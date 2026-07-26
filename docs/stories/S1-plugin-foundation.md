@@ -7,19 +7,6 @@ labels: ["backend", "infrastructure"]
 position: 1
 ---
 
-<!--
-  Story template — fill out each section before the story enters its own
-  brainstorming → planning → implementation cycle.
-
-  GUIDELINES:
-  - Describes WHAT and WHY. Never HOW.
-  - No implementation details: no routes, no schemas, no component names,
-    no file paths, no code, no pseudocode, no library choices.
-  - Each story delivers one concrete, user-verifiable outcome.
-  - Anything that applies to every story (e.g. "zero core changes") stays
-    in the PRD — don't repeat it here.
--->
-
 # Plugin Foundation
 
 ## Outcome
