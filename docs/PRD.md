@@ -1,4 +1,4 @@
-# Custom Fields for Vikunja — Epic Design
+# Custom Fields for Vikunja — Project Requirements
 
 **Date:** 2026-07-25
 
