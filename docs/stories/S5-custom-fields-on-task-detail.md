@@ -22,14 +22,14 @@ The rendering is data-driven: no field type is hardcoded. The frontend reads the
 ## Design Principles
 
 - **Indistinguishable from native fields** — this is the story that directly delivers that principle. A user should not perceive any difference between a built-in field and a custom field. Same visual treatment, same interaction patterns.
-- **Admin-managed, centrally governed** — the user sees the fields they're given. There is no UI for users to add, remove, or reconfigure fields on their tasks.
+- **Centrally governed** — the user sees the fields they're given. There is no UI for users to add, remove, or reconfigure fields on their tasks.
 - **Plugin as proving ground, not permanent home** — the frontend integration is designed as if custom fields were a native API resource, consuming it from the plugin prefix only because the plugin system requires it.
 
 ## Dependencies
 
 - **Must come after:** S3 (Task Field Values API)
-- **Must come before:** S6 (Admin Field Management UI), S7 (Build, Deploy & Document)
-- **Can run in parallel with:** S4 (Config File)
+- **Must come before:** S7 (Build, Deploy & Document)
+- **Can run in parallel with:** S4 (Config Whitelist), S6 (Management UI)
 
 ## Acceptance Criteria
 
@@ -52,5 +52,5 @@ The rendering is data-driven: no field type is hardcoded. The frontend reads the
 **Out of scope:**
 - The quick-add magic input for task creation (per PRD: "Quick Add Magic support for custom fields" is out of scope)
 - Custom fields in list/kanban/table/gantt views — task detail only
-- The admin panel for managing field definitions — S6
+- The management UI for field definitions — S6
 - Validation error display style (errors are shown, but exact placement is left to implementation)
