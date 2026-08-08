@@ -21,7 +21,7 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 
 ## Design Principles
 
-- **Works without a license** — the documentation covers both config-file and admin-UI paths for defining fields.
+- **Works without a license** — the documentation covers management via the plugin-served UI and the config whitelist, with no licensed feature involved.
 - **Plugin as proving ground, not permanent home** — the deployment model works today with the plugin system, but the documentation notes that the feature may be proposed upstream, at which point deployment simplifies to a stock Vikunja binary.
 
 ## Dependencies
@@ -34,9 +34,9 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 
 1. Running the existing Dockerfile from the fork produces a single image containing both the modified frontend and the stock Vikunja API.
 2. Mounting the plugin source directory into the container at the configured path loads the plugin on startup.
-3. The plugin loads successfully in a running container and custom fields are functional end-to-end (config → definition → value → task detail display).
-4. A README exists in the plugin repo with clear setup instructions covering: enabling plugins in config, mounting the plugin directory, and defining fields via config file or admin UI.
-5. The documentation distinguishes between licensed and unlicensed setup paths.
+3. The plugin loads successfully in a running container and custom fields are functional end-to-end (whitelist → definition → value → task detail display).
+4. A README exists in the plugin repo with clear setup instructions covering: enabling plugins in config, mounting the plugin directory, configuring the management whitelist, and managing fields via the plugin-served UI.
+5. The documentation notes that native management is a future epic, but the current setup needs no license.
 6. A Vikunja admin unfamiliar with the project can follow the documentation and get custom fields running without external help.
 
 ## Scope
@@ -44,9 +44,9 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 **In scope:**
 - Verification that the existing Dockerfile builds a working image from the fork
 - Plugin mount configuration and validation
-- End-to-end smoke testing (definition → value → display)
+- End-to-end smoke testing (whitelist → definition → value → display)
 - Plugin README with setup and usage documentation
-- License-aware setup paths in documentation
+- Whitelist and management-UI setup paths in documentation
 
 **Out of scope:**
 - CI/CD pipeline setup
