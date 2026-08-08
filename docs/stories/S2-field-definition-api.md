@@ -17,18 +17,18 @@ A whitelisted user can manage custom field definitions through the plugin API: c
 
 This story builds the CRUD API for field definitions on top of the tables created in S1. Field definitions are the schema layer — they describe what custom fields exist, what type they are, what constraints they have, and which projects they're assigned to. Without them, there's nothing to attach values to.
 
-The API follows Vikunja's conventions for request/response shapes, authentication, and error handling. Access is governed by the config whitelist (S4): only users on the whitelist can manage field definitions. This deliberately bypasses Vikunja's licensed admin feature.
+The API follows Vikunja's conventions for request/response shapes, authentication, and error handling. Access is governed by the config whitelist (S8): only users on the whitelist can manage field definitions. This deliberately bypasses Vikunja's licensed admin feature.
 
 ## Design Principles
 
-- **API-first, UI-second** — this story delivers the API surface for field definitions before any management UI exists. The management UI (S6) and frontend (S5) are both consumers of this same API contract.
+- **API-first, UI-second** — this story delivers the API surface for field definitions before any management UI exists. The management UI (S9) and frontend (S5) are both consumers of this same API contract.
 - **Centrally governed** — field definitions can only be created or modified by a config-whitelisted user.
 - **Plugin as proving ground, not permanent home** — the API is designed as if it were a `/api/v2/custom-fields` resource, just served from the plugin route prefix.
 
 ## Dependencies
 
-- **Must come after:** S1 (Plugin Foundation), S4 (Config Whitelist)
-- **Must come before:** S3 (Task Field Values API), S6 (Management UI)
+- **Must come after:** S1 (Plugin Foundation), S8 (Config Whitelist)
+- **Must come before:** S3 (Task Field Values API), S9 (Management UI)
 - **Can run in parallel with:** S5 (Custom Fields on Task Detail)
 
 ## Acceptance Criteria
@@ -46,12 +46,12 @@ The API follows Vikunja's conventions for request/response shapes, authenticatio
 **In scope:**
 - Full CRUD API for field definitions
 - Validation (types, required fields, constraints)
-- Whitelist-based authorization (dependency: S4)
+- Whitelist-based authorization (dependency: S8)
 - Project assignment (one field → one or more projects, or all projects)
 
 **Out of scope:**
 - Storing or retrieving field values on tasks — S3
-- The management UI that consumes this API — S6
+- The management UI that consumes this API — S9
 - Any frontend task-detail changes — S5
 - Soft-delete or archival of fields
 - "API-only" field flag — defer to S3

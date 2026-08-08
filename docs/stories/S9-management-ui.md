@@ -4,31 +4,31 @@ description: "A temporary web interface served by the plugin for managing custom
 status: pending
 priority: 60
 labels: ["frontend"]
-position: 6
+position: 9
 ---
 
 # Management UI
 
 ## Outcome
 
-A whitelisted user (from the config whitelist, S4) can manage custom field definitions through a web interface served by the plugin — no licensed admin panel required. They open the page in the browser, create fields, pick a type, set constraints, assign them to projects, and edit or delete them, all without leaving the browser.
+A whitelisted user (from the config whitelist, S8) can manage custom field definitions through a web interface served by the plugin — no licensed admin panel required. They open the page in the browser, create fields, pick a type, set constraints, assign them to projects, and edit or delete them, all without leaving the browser.
 
 ## What & Why
 
 The Field Definition API (S2) works, but requiring whitelisted users to manage fields through curl or an API client is a poor experience. This story provides a web interface served by the plugin that manages field definitions against the same database the API reads.
 
-This is a **temporary** stand-in. It is served from a plugin route so it bypasses Vikunja's licensed admin feature entirely. Authenticating through the user's existing Vikunja browser session, it is gated by the config whitelist (S4). A future epic replaces this with native custom-field management integrated into Vikunja's own interface, for both licensed and unlicensed instances.
+This is a **temporary** stand-in. It is served from a plugin route so it bypasses Vikunja's licensed admin feature entirely. Authenticating through the user's existing Vikunja browser session, it is gated by the config whitelist (S8). A future epic replaces this with native custom-field management integrated into Vikunja's own interface, for both licensed and unlicensed instances.
 
 ## Design Principles
 
 - **Works without a license** — the UI is served by the plugin and whitelist-gated, never touching Vikunja's licensed admin feature.
-- **Centrally governed** — the UI is the whitelisted user's tool; it checks the whitelist (S4) before allowing changes.
+- **Centrally governed** — the UI is the whitelisted user's tool; it checks the whitelist (S8) before allowing changes.
 - **API-first, UI-second** — the UI is a consumer of the S2 API. It adds no new backend capabilities, only a browser interface to existing ones.
 - **Plugin as proving ground, not permanent home** — the UI is a temporary stand-in; the future epic is native integration.
 
 ## Dependencies
 
-- **Must come after:** S2 (Field Definition API), S4 (Config Whitelist)
+- **Must come after:** S2 (Field Definition API), S8 (Config Whitelist)
 - **Must come before:** S7 (Build, Deploy & Document)
 - **Can run in parallel with:** S5 (Custom Fields on Task Detail)
 
@@ -50,7 +50,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 - Create, edit, delete forms consuming the S2 API
 - List view of existing field definitions
 - Inline validation error display
-- Whitelist-gated access (via S4)
+- Whitelist-gated access (via S8)
 - Browser-session authentication
 
 **Out of scope:**

@@ -29,7 +29,7 @@ The rendering is data-driven: no field type is hardcoded. The frontend reads the
 
 - **Must come after:** S3 (Task Field Values API)
 - **Must come before:** S7 (Build, Deploy & Document)
-- **Can run in parallel with:** S4 (Config Whitelist), S6 (Management UI)
+- **Can run in parallel with:** S8 (Config Whitelist), S9 (Management UI)
 
 ## Acceptance Criteria
 
@@ -52,5 +52,5 @@ The rendering is data-driven: no field type is hardcoded. The frontend reads the
 **Out of scope:**
 - The quick-add magic input for task creation (per PRD: "Quick Add Magic support for custom fields" is out of scope)
 - Custom fields in list/kanban/table/gantt views — task detail only
-- The management UI for field definitions — S6
+- The management UI for field definitions — S9
 - Validation error display style (errors are shown, but exact placement is left to implementation)

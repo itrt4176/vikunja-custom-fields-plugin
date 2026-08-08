@@ -51,5 +51,5 @@ Without this, no other story can start. Every subsequent story assumes the plugi
 - Any API handler logic beyond a health-check or placeholder route
 - Field definition CRUD operations — S2
 - Field value CRUD operations — S3
-- Config whitelist parsing — S4
+- Config whitelist parsing — S8
 - Any frontend changes

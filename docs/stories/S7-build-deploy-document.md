@@ -15,7 +15,7 @@ The custom fields feature — backend plugin and frontend changes together — s
 
 ## What & Why
 
-All the code from S1–S6 only matters if it can be deployed. This story wires everything together: the Docker build produces one image containing the forked Vikunja binary (with the modified frontend embedded), and the plugin directory is mounted at runtime. A README and setup guide walk other admins through installation, configuration, and usage.
+All the code from S1–S3, S5, S8, S9 only matters if it can be deployed. This story wires everything together: the Docker build produces one image containing the forked Vikunja binary (with the modified frontend embedded), and the plugin directory is mounted at runtime. A README and setup guide walk other admins through installation, configuration, and usage.
 
 This story also validates the end-to-end experience: build, deploy, configure, use. Any integration issues discovered here get fixed or fed back to earlier stories.
 
@@ -26,7 +26,7 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 
 ## Dependencies
 
-- **Must come after:** all other stories (S1–S6)
+- **Must come after:** all other stories (S1–S3, S5, S8, S9)
 - **Must come before:** none
 - **Can run in parallel with:** none
 
