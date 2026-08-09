@@ -1,0 +1,23 @@
+service:
+  secret: "test-secret-do-not-use-in-production"
+  testingtoken: "test-token-for-seeding"
+  enableregistration: true
+
+database:
+  type: sqlite
+  path: /db/vikunja.db
+
+plugins:
+  enabled: true
+  dir: /app/vikunja/plugins
+  loader: yaegi
+
+log:
+  level: DEBUG
+  http: stdout
+
+mailer:
+  enabled: false
+
+ratelimit:
+  enabled: false
