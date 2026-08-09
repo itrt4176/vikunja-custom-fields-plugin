@@ -43,6 +43,8 @@ SEED_RESPONSE=$(curl -s -X PUT "$BASE_URL/api/v2/test/users?truncate=true" \
     \"username\": \"$TEST_USER\",
     \"password\": \"\$2b\$10\$8.vLTS6/Ya5NCMHvP3ZiS.1shEBBsVJsTwYy8BET6B/a/zvLo/vQS\",
     \"email\": \"test@localhost.local\",
+    \"created\": \"2026-08-08T00:00:00Z\",
+    \"updated\": \"2026-08-08T00:00:00Z\",
     \"issuer\": \"local\",
     \"status\": 0
   }]")
