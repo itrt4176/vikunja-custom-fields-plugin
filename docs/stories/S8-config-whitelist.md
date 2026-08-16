@@ -29,7 +29,7 @@ The whitelist is consumed by any management surface: the field definition API (S
 
 - **Must come after:** S1 (Plugin Foundation)
 - **Must come before:** S2 (Field Definition API), S9 (Management UI)
-- **Can run in parallel with:** S3 (Task Field Values API)
+- **Can run in parallel with:** none (S3 is downstream of S2, which depends on this story)
 
 ## Acceptance Criteria
 

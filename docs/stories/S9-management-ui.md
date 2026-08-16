@@ -30,7 +30,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 
 - **Must come after:** S2 (Field Definition API), S8 (Config Whitelist)
 - **Must come before:** S7 (Build, Deploy & Document)
-- **Can run in parallel with:** S5 (Custom Fields on Task Detail)
+- **Can run in parallel with:** S3 (Task Field Values API), S5 (Custom Fields on Task Detail)
 
 ## Acceptance Criteria
 

@@ -29,7 +29,7 @@ The API follows Vikunja's conventions for request/response shapes, authenticatio
 
 - **Must come after:** S1 (Plugin Foundation), S8 (Config Whitelist)
 - **Must come before:** S3 (Task Field Values API), S9 (Management UI)
-- **Can run in parallel with:** S5 (Custom Fields on Task Detail)
+- **Can run in parallel with:** none (S5 is a downstream consumer of this API)
 
 ## Acceptance Criteria
 

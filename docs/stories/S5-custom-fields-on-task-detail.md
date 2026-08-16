@@ -29,7 +29,7 @@ The rendering is data-driven: no field type is hardcoded. The frontend reads the
 
 - **Must come after:** S3 (Task Field Values API)
 - **Must come before:** S7 (Build, Deploy & Document)
-- **Can run in parallel with:** S8 (Config Whitelist), S9 (Management UI)
+- **Can run in parallel with:** S9 (Management UI)
 
 ## Acceptance Criteria
 

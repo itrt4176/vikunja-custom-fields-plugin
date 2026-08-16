@@ -31,7 +31,7 @@ Since Vikunja fires a `TaskDeletedEvent`, this story also registers a listener t
 
 - **Must come after:** S2 (Field Definition API)
 - **Must come before:** S5 (Custom Fields on Task Detail)
-- **Can run in parallel with:** S8 (Config Whitelist)
+- **Can run in parallel with:** S9 (Management UI)
 
 ## Acceptance Criteria
 
