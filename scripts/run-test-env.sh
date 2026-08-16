@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE_URL="http://127.0.0.1:3456"
+BASE_URL="http://127.0.0.1:4176"
 TESTING_TOKEN="test-token-for-seeding"
 TEST_USER="testuser"
 TEST_PASS="testpassword"
@@ -14,6 +14,7 @@ find . -name '*.go' -exec chmod a+r {} \+ 2>/dev/null || true
 # ── Step 1: Start the container ─────────────────────────────────
 echo "==> Starting Vikunja test instance..."
 docker compose -f compose.test.yml down --volumes 2>/dev/null || true
+rm -rf db && mkdir -p db
 docker compose -f compose.test.yml up -d
 
 # ── Step 2: Wait for health ─────────────────────────────────────

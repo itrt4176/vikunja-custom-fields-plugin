@@ -2,10 +2,9 @@ services:
   vikunja:
     image: vikunja/vikunja:2.4
     ports:
-      - "127.0.0.1:3456:3456"
-    tmpfs:
-      - /db:uid=1000,gid=1000,mode=0750
+      - "127.0.0.1:4176:3456"
     volumes:
       - ./:/app/vikunja/plugins/custom-fields
       - ./config.test.yml:/etc/vikunja/config.yml:ro
+      - ./db:/db
     restart: "no"
