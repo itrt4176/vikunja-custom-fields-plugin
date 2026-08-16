@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 
 	"code.vikunja.io/api/pkg/db"
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
+	"github.com/labstack/echo/v5"
 )
 
 // CustomFieldDefinition is a single custom field's schema. S2 adds columns
@@ -132,6 +134,24 @@ func (p *CustomFieldsPlugin) Shutdown() error {
 	return nil
 }
 
+// RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
+// /api/v1/plugins/ group.
+func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
+	g.GET("/custom-fields/health", healthHandler)
+}
+
+func healthHandler(c *echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{
+		"name":    "custom-fields",
+		"version": "0.1.0",
+		"status":  "ok",
+	})
+}
+
 var singleton = &CustomFieldsPlugin{}
 
 func NewPlugin() plugins.Plugin { return singleton }
+
+// NewAuthenticatedRouterPlugin is the typed factory yaegi's loader requires — yaegi
+// wraps return values per declared type, so sub-interface assertions don't work.
+func NewAuthenticatedRouterPlugin() plugins.AuthenticatedRouterPlugin { return singleton }
