@@ -25,12 +25,12 @@ transitive edges collapsed; the complete per-story table follows.
                  ▼     ▼
    S3 (Task Field   S9 (Management UI)
     Values API)        │
-                 │      │
-                 ▼      │
+                 │     │
+                 ▼     │
    S5 (Custom Fields   │
      on Task Detail)   │
-                 │      │
-                 └──┬───┘
+                 │     │
+                 └──┬──┘
                     ▼
                 S7 (Build, Deploy & Document)
 ```
@@ -38,8 +38,8 @@ transitive edges collapsed; the complete per-story table follows.
 ### Minimal DAG
 
 ```
-S1 ──▶ S8 ──▶ S2 ──▶ S3 ──▶ S5 ──┐
-                  └──▶ S9 ────────┼──▶ S7
+S1 ──▶ S8 ──▶ S2 ─┬─▶ S3 ──▶ S5 ──┐
+                  └──▶ S9 ────────┴──▶ S7
 ```
 
 ### Valid parallel pairs
@@ -76,7 +76,7 @@ without slipping the final S7 ship date.
 
 **S1 → S8 → S2 → S3 → S5 → S7**
 
-- [ ] **S1** — Plugin Foundation
+- [x] **S1** — Plugin Foundation
 - [ ] **S8** — Config Whitelist
 - [ ] **S2** — Field Definition API
 - [ ] **S3** — Task Field Values API
