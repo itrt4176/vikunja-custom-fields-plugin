@@ -1,35 +1,41 @@
 # S8 Config Whitelist Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Amended 2026-08-29:** mechanism changed from `os.Getenv` (infeasible under
+> yaegi) to `viper.GetString("customfields.whitelist")` (Vikunja's native config).
+> Base changed to current `develop` (xormigrate migration in S1; trivial `Init()`).
+> See the spec's amendment note.
 
-**Goal:** Read a management whitelist from an env var at plugin startup and expose it as a `IsManager(username) bool` predicate that S2/S9 use to gate field-definition operations.
+**Goal:** Read a management whitelist from Vikunja's config (`customfields.whitelist`, overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var) at plugin startup and expose it as an `IsManager(username) bool` predicate that S2/S9 use to gate field-definition operations.
 
-**Architecture:** Single `main.go` (package `main`, the existing yaegi plugin file) gains a package-level whitelist set populated in `Init()` from `VIKUNJA_CUSTOMFIELDS_WHITELIST`, a lowercase-normalized `IsManager` predicate, and a temporary authenticated route that proves the predicate for the logged-in caller. No fork change; no core Vikunja files modified. Integration-verified via the existing Docker test instance.
+**Architecture:** Single `main.go` (package `main`, the existing yaegi plugin file) gains a package-level whitelist set populated in `Init()` via `viper.GetString`, a lowercase-normalized `IsManager` predicate, and a temporary authenticated route that proves the predicate for the logged-in caller. No per-feature fork change (the `config`/`viper` symbol-table exposure is upstream PR #3502, backported to the test image); no core Vikunja files modified. Integration-verified via the existing Docker test instance.
 
-**Tech Stack:** Go (yaegi-interpreted plugin), Vikunja 2.5 plugin API (`pkg/user`, `pkg/db`, `pkg/log`, `pkg/plugins`, echo v5), SQLite test instance, Docker Compose.
+**Tech Stack:** Go (yaegi-interpreted plugin), Vikunja 2.5 plugin API (`pkg/user`, `pkg/log`, `pkg/plugins`, `github.com/spf13/viper`, echo v5, `xorm`/`xormigate` for the S1 migration), SQLite test instance, Docker Compose.
 
 **Spec:** `docs/superpowers/specs/2026-08-16-s8-config-whitelist-design.md`
 
 ## Global Constraints
 
-- **No fork change:** the `vikunja/` repo is untouched. All work is in the plugin repo.
+- **No per-feature fork change:** the `vikunja/` repo is untouched by S8. The `pkg/config` + `viper` (PR #3502) and `xorm` + `xormigate` (PR #3549) symbol-table exposures are upstream, backported to the test image `itrt4176/vikunja:2.5-plugin-fix-backport` — not S8's work.
 - **No core Vikunja files modified.** Everything lands in the plugin's single `main.go` plus test-harness files.
-- **Env var name (verbatim):** `VIKUNJA_CUSTOMFIELDS_WHITELIST` — comma-separated usernames.
-- **Imports available to yaegi (verified):** `code.vikunja.io/api/pkg/db`, `code.vikunja.io/api/pkg/log`, `code.vikunja.io/api/pkg/plugins`, `code.vikunja.io/api/pkg/user`, `github.com/labstack/echo/v5`, stdlib. **NOT** `pkg/config`, `xorm`, `xormigrate`, `web`.
-- **`db.NewSession()` opens an active transaction** that auto-rolls-back on `Close()` — `Init()` already commits it in S1; S8 adds whitelist parsing **before** the existing table-creation block, within the same session lifecycle. No new session.
+- **Config key (verbatim):** `customfields.whitelist` — comma-separated usernames, under a `customfields:` section in `config.yml`. Env override (verbatim): `VIKUNJA_CUSTOMFIELDS_WHITELIST`.
+- **Source accessor (verbatim):** `viper.GetString("customfields.whitelist")` — reads Vikunja's global viper (the same instance `pkg/config` loads); `AutomaticEnv` makes `VIKUNJA_CUSTOMFIELDS_WHITELIST` override it.
+- **Imports available to yaegi (verified, post-backport):** `code.vikunja.io/api/pkg/log`, `code.vikunja.io/api/pkg/plugins`, `code.vikunja.io/api/pkg/user`, `code.vikunja.io/api/pkg/config`, `github.com/spf13/viper`, `github.com/labstack/echo/v5`, `xorm.io/xorm`, `src.techknowlogick.com/xormigrate`, stdlib. (S8 uses `viper`, not `config`, for directness.)
+- **`Init()` no longer opens a DB session** on the new base — S1's tables are created by the `xormigrate` migration, so `Init()` is now trivial. S8 adds `whitelist = loadWhitelist()` as the first line of `Init()`; no session lifecycle involved.
 - **Deny-by-default:** empty whitelist → `IsManager` returns `false` for everyone (AC#3, AC#5).
 - **Case-insensitive comparison:** usernames are lowercased on both sides (set population and lookup).
 - **Malformed entry = empty after trim** (e.g. `alice,,bob`, trailing comma) → logged error naming position, skipped, no crash (AC#4).
-- **Conventional Commits** for all commits. git-flow: implementation lands on `feature/s8-config-whitelist` off `develop` (the spec + this plan are already committed on `develop`, matching S1's flow).
-- **Worktree:** per `CLAUDE.local.md`, the worktree decision is raised with the user before any code work begins. This plan assumes the executor has already resolved that (either working in a worktree or directly on the feature branch).
+- **Conventional Commits** for all commits. git-flow: implementation lands on `feature/s8-config-whitelist` off `develop` (the spec + this plan are committed on `develop`, matching S1's flow).
+- **Worktree:** resolved with the user — no worktree; work directly on the feature branch.
 
 ## Required Skills (per CLAUDE.local.md)
 
 Invoke these before/during the matching tasks:
 
 - **git-flow** — before any branch/commit work (Task 0 branch setup; every commit).
-- **golang-testing** — for the test design in Task 4 (table-driven integration verification expectations; the plugin source itself is not unit-testable standalone).
-- **golang-error-handling** — Task 1 (malformed-entry logging path) and Task 3 (handler error paths).
+- **golang-error-handling** — Task 1 (malformed-entry logging path) and Task 2 (handler error paths).
+- **golang-testing** — for the test design in Task 5 (per-AC integration assertions; the plugin source itself is not unit-testable standalone).
 
 ## Recommended Skills
 
@@ -41,14 +47,14 @@ Invoke these before/during the matching tasks:
 
 | File | Responsibility | Change |
 |---|---|---|
-| `main.go` | Plugin: tables, routes, whitelist set, predicate, verification route | Modify |
-| `compose.test.yml` | Expose `VIKUNJA_CUSTOMFIELDS_WHITELIST` to the test container | Modify |
-| `config.test.yml` | Unchanged — env var is set via compose `environment:`, not the YAML | — |
+| `main.go` | Plugin: tables (via migration), routes, whitelist set, predicate, verification route | Modify |
+| `config.test.yml` | Declare `customfields.whitelist` for the test instance | Modify |
+| `compose.test.yml` | Unchanged — whitelist lives in config.test.yml; env override used only as a temporary AC#4 probe | — |
 | `scripts/run-test-env.sh` | Seed a second, non-whitelisted user; print both JWTs | Modify |
-| `docs/stories/S8-config-whitelist.md` | Story wording: "config file" → "env var" | Modify |
-| `docs/PRD.md` | "Config file — single responsibility" → env var | Modify |
-| `docs/stories/S2-field-definition-api.md` | "config whitelist" reference | Modify |
-| `docs/stories/S9-management-ui.md` | "config whitelist" reference | Modify |
+| `docs/stories/S8-config-whitelist.md` | Story wording: name the `customfields.whitelist` key + env override | Modify |
+| `docs/PRD.md` | "Config file" bullet: name the key + env override | Modify |
+| `docs/stories/S2-field-definition-api.md` | "whitelist (S8)" reference | Modify |
+| `docs/stories/S9-management-ui.md` | "whitelist (S8)" reference | Modify |
 
 `main.go` stays a single file (yaegi single-file safest, per S1 spec line 40). The additions are small and cohesive — whitelist parsing, predicate, one handler, one route line — so a file split is not warranted at S8's size.
 
@@ -58,7 +64,7 @@ Invoke these before/during the matching tasks:
 - `func IsManager(username string) bool` — package-level, exported. Lowercases input, checks the set, deny-by-default. S2's field-definition handlers and S9's UI route call this to gate operations.
 
 **Consumes (from S1 / Vikunja):**
-- `db.NewSession() *xorm.Session`, `db.GetDialect()` — existing in `main.go` (S1).
+- `viper.GetString(key string) string` — from `github.com/spf13/viper` (new import). Reads Vikunja's global loaded config.
 - `user.GetCurrentUser(c *echo.Context) (*user.User, error)` — from `code.vikunja.io/api/pkg/user` (new import).
 - `log.Errorf` / `log.Infof` — existing import.
 
@@ -68,47 +74,47 @@ Invoke these before/during the matching tasks:
 
 **Files:** none (git only)
 
-- [ ] **Step 1: Confirm develop is current and clean**
+- [ ] **Step 1: Confirm the base**
 
 Run: `cd /mnt/data/nickp/Documents/Code/vikunja-projects/vikunja-custom-fields-plugin && git rev-parse --abbrev-ref HEAD && git status --short`
-Expected: branch `develop`, no uncommitted changes (the spec `4221e79` and the S1 history are committed).
+Expected: on `feature/s8-config-whitelist` (already reset onto current `develop` by the controller), clean tree. `develop` HEAD is `4b2e3ff` (xormigrate refactor). Confirm `git log --oneline -1 develop` shows the xormigrate commit.
 
-- [ ] **Step 2: Start the feature branch off develop**
+- [ ] **Step 2: Confirm the branch is based on the new base**
 
-Run: `git flow feature start s8-config-whitelist`
-Expected: creates and switches to `feature/s8-config-whitelist` off `develop`.
-
-- [ ] **Step 3: Confirm**
-
-Run: `git rev-parse --abbrev-ref HEAD`
-Expected: `feature/s8-config-whitelist`.
+Run: `git log --oneline -3`
+Expected: the xormigrate refactor commit `4b2e3ff` and the custom-image commit `fb5e64d` are in history (the branch sits on current `develop`). No stale `os.Getenv`/raw-SQL commits from the first pass remain.
 
 ---
 
 ### Task 1: Whitelist parsing + `IsManager` predicate (the seam)
 
-This task adds the load logic, the set, and the predicate. No route yet — that's Task 2, so the predicate can be reasoned about in isolation. S1's table-creation block stays intact; parsing runs before it in `Init()`.
+This task adds the load logic, the set, and the predicate. No route yet — that's Task 2, so the predicate can be reasoned about in isolation. The new base's `Init()` is trivial (tables are created by the migration); S8 prepends the whitelist load.
 
 **Files:**
-- Modify: `main.go` (add imports `os`, `strings`, `code.vikunja.io/api/pkg/user`; add `whitelist` var, `loadWhitelist`, `IsManager`; call `loadWhitelist` in `Init`)
+- Modify: `main.go` (add imports `strings`, `github.com/spf13/viper`, `code.vikunja.io/api/pkg/user`; add `whitelist` var, `loadWhitelist`, `IsManager`; call `loadWhitelist` in `Init`)
 
 **Interfaces:**
 - Produces: `func IsManager(username string) bool`
-- Consumes: stdlib `os`, `strings`; `code.vikunja.io/api/pkg/log`
+- Consumes: stdlib `strings`; `github.com/spf13/viper`; `code.vikunja.io/api/pkg/log`
+
+**Required Skills:** git-flow, golang-error-handling. **Recommended:** golang-naming, golang-code-style.
 
 - [ ] **Step 1: Add imports and the package-level whitelist set**
 
-In `main.go`, update the import block and add the variable. The current import block is:
+The current (develop) import block is:
 
 ```go
 import (
 	"fmt"
 	"net/http"
+	"time"
 
-	"code.vikunja.io/api/pkg/db"
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
+
 	"github.com/labstack/echo/v5"
+	"src.techknowlogick.com/xormigrate"
+	"xorm.io/xorm"
 )
 ```
 
@@ -118,14 +124,17 @@ Replace with:
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
+	"time"
 
-	"code.vikunja.io/api/pkg/db"
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
 	"code.vikunja.io/api/pkg/user"
+
 	"github.com/labstack/echo/v5"
+	"github.com/spf13/viper"
+	"src.techknowlogick.com/xormigrate"
+	"xorm.io/xorm"
 )
 ```
 
@@ -133,8 +142,9 @@ Then add the package-level set immediately above the `CustomFieldsPlugin` struct
 
 ```go
 // whitelist holds the lowercase usernames permitted to manage custom fields.
-// Populated once in Init() from the VIKUNJA_CUSTOMFIELDS_WHITELIST env var;
-// read-only afterward, so it needs no synchronization.
+// Populated once in Init() from Vikunja's config (customfields.whitelist,
+// overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST env var); read-only
+// afterward, so it needs no synchronization.
 var whitelist map[string]struct{}
 ```
 
@@ -143,16 +153,16 @@ var whitelist map[string]struct{}
 Add after the `whitelist` var declaration:
 
 ```go
-// loadWhitelist reads the management whitelist from the
-// VIKUNJA_CUSTOMFIELDS_WHITELIST env var and returns a lowercase-normalized
-// set of permitted usernames. Source is isolated here so a future swap to
-// pkg/config (if it's ever exposed to yaegi) is a one-function change.
+// loadWhitelist reads the management whitelist from Vikunja's config
+// (the customfields.whitelist key, overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST
+// env var) and returns a lowercase-normalized set of permitted usernames. Source
+// is isolated here so a future swap to config.Key(...) is a one-function change.
 //
 // Malformed entries (empty after trimming, e.g. "alice,,bob") are logged and
-// skipped — never fatal. An absent/empty var yields an empty set (deny-all).
+// skipped — never fatal. An absent/empty value yields an empty set (deny-all).
 func loadWhitelist() map[string]struct{} {
 	set := map[string]struct{}{}
-	raw := os.Getenv("VIKUNJA_CUSTOMFIELDS_WHITELIST")
+	raw := viper.GetString("customfields.whitelist")
 	if raw == "" {
 		log.Infof("[custom-fields] whitelist empty — no users may manage custom fields")
 		return set
@@ -188,33 +198,38 @@ func IsManager(username string) bool {
 }
 ```
 
-- [ ] **Step 4: Call `loadWhitelist` in `Init()` before table creation**
+- [ ] **Step 4: Call `loadWhitelist` in `Init()`**
 
-In `Init()`, the current first lines are:
+The current (develop) `Init()` is:
 
 ```go
 func (p *CustomFieldsPlugin) Init() error {
-	s := db.NewSession()
-	defer s.Close()
+	log.Infof("[custom-fields] plugin v0.1.0 initialized")
+	return nil
+}
 ```
 
-Add the whitelist load right after `defer s.Close()` and before the `switch db.GetDialect()`:
+Replace with:
 
 ```go
+func (p *CustomFieldsPlugin) Init() error {
 	whitelist = loadWhitelist()
+	log.Infof("[custom-fields] plugin v0.1.0 initialized")
+	return nil
+}
 ```
 
-(The whitelist is config, not DB — parsing it inside the session block is fine; it has no session dependency. Placing it before table creation keeps "governance setup" logically first.)
+(The whitelist is config, not DB. `Init()` no longer opens a session on this base — tables come from the migration — so the load is the first thing `Init()` does. No session lifecycle to worry about.)
 
-- [ ] **Step 5: Rebuild-free sanity check — compile mentally / re-read**
+- [ ] **Step 5: Re-read sanity check**
 
-There is no standalone `go build` for the plugin (imports resolve only inside the vikunja module). Verification is integration (Task 4). Here, just re-read `main.go` to confirm: imports added, `whitelist` var declared, `loadWhitelist` and `IsManager` present, `Init()` calls `loadWhitelist()` before the dialect switch, and the S1 table-creation block is unchanged.
+There is no standalone `go build` for the plugin (imports resolve only inside the vikunja module). Re-read `main.go` to confirm: imports added (`strings`, `viper`, `user`), `whitelist` var declared, `loadWhitelist` and `IsManager` present, `Init()` calls `loadWhitelist()` first, and the S1 migration block / struct definitions / other factories are unchanged.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add main.go
-git commit -m "feat: parse management whitelist from env var and expose IsManager"
+git commit -m "feat: parse management whitelist from Vikunja config and expose IsManager"
 ```
 
 ---
@@ -229,6 +244,8 @@ Adds the authenticated `/manager` route that proves the predicate resolves for t
 **Interfaces:**
 - Consumes: `IsManager` (Task 1), `user.GetCurrentUser`, `echo.Context`
 - Produces: `GET /api/v1/plugins/custom-fields/manager` → `{ "username": string, "is_manager": bool }`
+
+**Required Skills:** git-flow, golang-error-handling. **Recommended:** golang-naming, golang-code-style.
 
 - [ ] **Step 1: Add the handler**
 
@@ -283,54 +300,41 @@ git commit -m "feat: add temporary S8 whitelist verification route"
 
 ---
 
-### Task 3: Wire the env var into the test harness
+### Task 3: Declare the whitelist in the test config
 
-Sets `VIKUNJA_CUSTOMFIELDS_WHITELIST` for the test container so the harness exercises a populated whitelist. The whitelisted user is `testuser` (the existing seed). A second, non-whitelisted user is added in Task 4's harness update.
+Sets `customfields.whitelist` in `config.test.yml` so the harness exercises a populated whitelist read from the config file (the documented mechanism). The whitelisted user is `testuser` (the existing seed). A second, non-whitelisted user is added in Task 4's harness update. `compose.test.yml` is NOT modified — the env override is used only as a temporary AC#4 probe in Task 5.
 
 **Files:**
-- Modify: `compose.test.yml` (add `environment:` block)
+- Modify: `config.test.yml` (add a `customfields:` section)
 
-- [ ] **Step 1: Add the environment block**
+**Required Skills:** git-flow. **Recommended:** golang-code-style.
 
-The current `compose.test.yml` is:
+- [ ] **Step 1: Add the `customfields` section**
 
-```yaml
-services:
-  vikunja:
-    image: vikunja/vikunja:2.5
-    ports:
-      - "127.0.0.1:4176:3456"
-    volumes:
-      - ./:/app/vikunja/plugins/custom-fields
-      - ./config.test.yml:/etc/vikunja/config.yml:ro
-      - ./db:/db
-    restart: "no"
-```
-
-Replace with (add the `environment:` block after `volumes:`):
+The current `config.test.yml` ends with:
 
 ```yaml
-services:
-  vikunja:
-    image: vikunja/vikunja:2.5
-    ports:
-      - "127.0.0.1:4176:3456"
-    volumes:
-      - ./:/app/vikunja/plugins/custom-fields
-      - ./config.test.yml:/etc/vikunja/config.yml:ro
-      - ./db:/db
-    environment:
-      - VIKUNJA_CUSTOMFIELDS_WHITELIST=testuser
-    restart: "no"
+ratelimit:
+  enabled: false
 ```
 
-Only `testuser` is whitelisted. The second seed user (`otheruser`, added in Task 4) is intentionally **off** the whitelist and is used for the deny assertion in Task 5. (Task 5's malformed-entry probe temporarily adds `otheruser` to the env var to confirm a skipped empty entry doesn't prevent valid neighbors from being recognized — that's a throwaway edit, reverted in the same task.)
+Append a `customfields` section (top-level key, after `ratelimit`):
+
+```yaml
+ratelimit:
+  enabled: false
+
+customfields:
+  whitelist: "testuser"
+```
+
+Only `testuser` is whitelisted. The second seed user (`otheruser`, added in Task 4) is intentionally **off** the whitelist and is used for the deny assertion in Task 5. (Task 5's malformed-entry probe temporarily sets the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env override to `testuser,,otheruser` to confirm a skipped empty entry doesn't prevent valid neighbors from being recognized — that's a throwaway compose edit, reverted in the same task.)
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add compose.test.yml
-git commit -m "test(docker): set VIKUNJA_CUSTOMFIELDS_WHITELIST for test instance"
+git add config.test.yml
+git commit -m "test: declare customfields.whitelist for the test instance"
 ```
 
 ---
@@ -343,7 +347,9 @@ Adds a second user (`otheruser`, not on the whitelist) to the seed step and logs
 - Modify: `scripts/run-test-env.sh`
 
 **Interfaces:**
-- Produces: `JWT_TESTUSER` and `JWT_OTHERUSER` printed for the operator; the `/manager` deny path is exercised with `JWT_OTHERUSER` in Task 5.
+- Produces: `JWT` and `JWT_OTHERUSER` printed for the operator; the `/manager` deny path is exercised with `JWT_OTHERUSER` in Task 5.
+
+**Required Skills:** git-flow, golang-testing (expectation design). **Recommended:** golang-naming.
 
 - [ ] **Step 1: Extend the seed payload to two users**
 
@@ -382,7 +388,7 @@ fi
 echo "   Test users created (managers: $TEST_USER; non-manager: otheruser)"
 ```
 
-(The bcrypt hash is reused — both users share password `testpassword`. `otheruser` is deliberately **not** on the whitelist set in `compose.test.yml`.)
+(The bcrypt hash is reused — both users share password `testpassword`. `otheruser` is deliberately **not** on the whitelist declared in `config.test.yml`.)
 
 - [ ] **Step 2: Log in both users and capture both JWTs**
 
@@ -452,6 +458,8 @@ Runs the test harness and exercises every AC against the live instance. This tas
 
 **Files:** none (verification only). Outputs are read from logs and `curl`/`jq`.
 
+**Required Skills:** golang-testing, systematic-debugging (only if an AC fails). **Recommended:** golang-error-handling.
+
 - [ ] **Step 1: Start the instance and capture tokens**
 
 Run: `./scripts/run-test-env.sh`
@@ -462,7 +470,9 @@ Expected: prints both `JWT` and `JWT_OTHERUSER`. Export them in your shell as th
 Check the container startup log for the loaded-count line.
 
 Run: `docker compose -f compose.test.yml logs vikunja 2>&1 | grep -i "whitelist"`
-Expected: a line `[custom-fields] whitelist loaded: 1 manager(s)` (only `testuser` is whitelisted, per `compose.test.yml`).
+Expected: a line `[custom-fields] whitelist loaded: 1 manager(s)` (only `testuser` is whitelisted, per `config.test.yml`).
+
+If instead you see the "whitelist empty" line, the config key was not read — check that `config.test.yml` has `customfields:\n  whitelist: "testuser"` and that the image is the backport build (which exposes `viper`). This is the residual runtime check from the spec.
 
 - [ ] **Step 3: AC#2 — whitelisted user allowed**
 
@@ -476,11 +486,13 @@ Expected: `{ "username": "otheruser", "is_manager": false }`. (Enforcement on fi
 
 - [ ] **Step 5: AC#4 — malformed entry logs error, no crash**
 
-Temporarily set a malformed whitelist and restart.
+Temporarily set a malformed whitelist via the env override and restart.
 
 Run:
 ```bash
-# Edit compose.test.yml environment to: VIKUNJA_CUSTOMFIELDS_WHITELIST=testuser,,otheruser
+# Temporarily add to compose.test.yml under `vikunja:`:
+#     environment:
+#       - VIKUNJA_CUSTOMFIELDS_WHITELIST=testuser,,otheruser
 # then restart:
 docker compose -f compose.test.yml down
 docker compose -f compose.test.yml up -d
@@ -488,9 +500,9 @@ docker compose -f compose.test.yml up -d
 until curl -sf -o /dev/null http://127.0.0.1:4176/api/v2/info; do sleep 2; done
 docker compose -f compose.test.yml logs vikunja 2>&1 | grep -i "whitelist"
 ```
-Expected: a line `[custom-fields] whitelist: ignoring empty entry at position 1` AND a line `[custom-fields] whitelist loaded: 2 manager(s)` (both `testuser` and `otheruser` now counted). Vikunja is healthy (the `/api/v2/info` probe succeeded) — no crash.
+Expected: a line `[custom-fields] whitelist: ignoring empty entry at position 1` AND a line `[custom-fields] whitelist loaded: 2 manager(s)` (both `testuser` and `otheruser` now counted — the env override replaced the config-file value). Vikunja is healthy (the `/api/v2/info` probe succeeded) — no crash.
 
-Then **revert** the `compose.test.yml` change back to `VIKUNJA_CUSTOMFIELDS_WHITELIST=testuser` and restart again for subsequent steps:
+Then **revert** the `compose.test.yml` change (remove the `environment:` block) and restart for subsequent steps:
 ```bash
 docker compose -f compose.test.yml down
 docker compose -f compose.test.yml up -d
@@ -500,11 +512,11 @@ Do not commit the malformed-value edit — it was a temporary verification probe
 
 - [ ] **Step 6: AC#5 — absent whitelist → empty, no crash**
 
-Temporarily unset the env var entirely and restart.
+Temporarily remove the config key entirely and restart.
 
 Run:
 ```bash
-# Temporarily comment out / remove the environment block in compose.test.yml, then:
+# Temporarily comment out / remove the `customfields:` section in config.test.yml, then:
 docker compose -f compose.test.yml down
 docker compose -f compose.test.yml up -d
 until curl -sf -o /dev/null http://127.0.0.1:4176/api/v2/info; do sleep 2; done
@@ -513,7 +525,7 @@ curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/plugins/cus
 ```
 Expected: a line `[custom-fields] whitelist empty — no users may manage custom fields`, and the `/manager` route returns `{ "is_manager": false }` for `testuser` too. Vikunja is healthy — no crash.
 
-Then **restore** the `environment:` block with `VIKUNJA_CUSTOMFIELDS_WHITELIST=testuser` and restart for the doc tasks. Again, `git diff compose.test.yml` should be clean afterward.
+Then **restore** the `customfields:` section with `whitelist: "testuser"` and restart for the doc tasks. Again, `git diff config.test.yml` should be clean afterward.
 
 - [ ] **Step 7: AC#6 note**
 
@@ -523,11 +535,15 @@ AC#6 ("shared with both S2 and S9") is **not verifiable in S8 alone** — it is 
 
 Only commit if Steps 5/6 left a real harness change (they shouldn't — both were reverted). If `git status --short` is clean, skip. If a genuinely intended harness fix emerged during verification, commit it as `test: ...`.
 
+- [ ] **Step 9: Report**
+
+Write the verification report (per-AC PASS/FAIL with command output) to the report file named for this task's brief. Return status, and if any AC failed, return BLOCKED with the failing AC and its output (do NOT attempt a code fix yourself — the controller routes fix work).
+
 ---
 
-### Task 6: Doc updates — "config file" → "env var" consistency
+### Task 6: Doc updates — name the config mechanism consistently
 
-Updates the story, PRD, and S2/S9 references so docs match the env-var mechanism. The whitelist *concept* and *name* are unchanged; only the *mechanism* wording changes.
+The stories and PRD originally worded the whitelist as living in "Vikunja's config file" — that wording is now correct (the whitelist IS read from the config file via viper). This task is a light touch: ensure the mechanism names the `customfields.whitelist` key and the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env override, and that no stray "environment variable" mechanism claims remain. The whitelist *concept* and *name* ("Config Whitelist") are unchanged.
 
 **Files:**
 - Modify: `docs/stories/S8-config-whitelist.md`
@@ -535,51 +551,34 @@ Updates the story, PRD, and S2/S9 references so docs match the env-var mechanism
 - Modify: `docs/stories/S2-field-definition-api.md`
 - Modify: `docs/stories/S9-management-ui.md`
 
+**Required Skills:** git-flow. **Recommended:** golang-naming.
+
 - [ ] **Step 1: S8 story**
 
-In `docs/stories/S8-config-whitelist.md`:
-
-- Outcome, line 14: `A whitelist of usernames (or user identifiers) in Vikunja's config file defines...` → `A whitelist of usernames in the VIKUNJA_CUSTOMFIELDS_WHITELIST environment variable defines...`
-- What & Why, line 18: `The config file — freely editable by any instance admin — is the natural license-free surface...` → `An environment variable — freely set by any instance admin — is the natural license-free surface...` and `This story makes the config file hold a single thing: the whitelist...` → `This story exposes a single thing: the whitelist...`
-- AC#1, line 36: `A whitelist of permitted users can be declared in Vikunja's config file.` → `A whitelist of permitted users can be declared via the VIKUNJA_CUSTOMFIELDS_WHITELIST environment variable.`
-- AC#4, line 39: `A malformed whitelist entry logs a clear error on startup but does not crash Vikunja.` → keep (still accurate — malformed = empty-after-trim entry in the comma list).
-- AC#5, line 40: `Vikunja starts successfully when the whitelist is absent (empty — no users may manage fields).` → keep (still accurate).
-- Scope, line 47: `Config schema for the management whitelist` → `Env-var schema for the management whitelist`.
-
-Keep the title `Config Whitelist` — the concept is unchanged; only the mechanism did.
+In `docs/stories/S8-config-whitelist.md`, ensure the mechanism wording says the whitelist lives in Vikunja's config under `customfields.whitelist` (overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var). If any line says the whitelist is an "environment variable" only, correct it to "Vikunja config (`customfields.whitelist`, overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var)". Keep the title `Config Whitelist`.
 
 - [ ] **Step 2: PRD**
 
-In `docs/PRD.md`:
-
-- Line 51, the "Config file" bullet under Architecture: `**Config file** — A single responsibility: the whitelist of users permitted to manage custom fields. It is not a source of field definitions.` → `**Config** — A single responsibility: the whitelist of users permitted to manage custom fields, declared via the VIKUNJA_CUSTOMFIELDS_WHITELIST env var. It is not a source of field definitions.`
-- Any "config-declared whitelist" / "config whitelist" phrasings (lines 21, 31, 47, etc.) → "env-var-declared whitelist" / "whitelist" where the mechanism is the point; leave "whitelist" alone where only the concept matters.
+In `docs/PRD.md`, ensure the "Config file" / "Config" bullet names the `customfields.whitelist` key and env override. Phrasings like "config-declared whitelist" / "config whitelist" may stay (the concept is config); add the key name where the mechanism is the point.
 
 - [ ] **Step 3: S2 story**
 
-In `docs/stories/S2-field-definition-api.md`:
-
-- Line 20: `Access is governed by the config whitelist (S8)` → `Access is governed by the management whitelist (S8, read from the VIKUNJA_CUSTOMFIELDS_WHITELIST env var)`.
-- Dependencies / scope references to "config whitelist" → "whitelist (S8)".
+In `docs/stories/S2-field-definition-api.md`, references to "config whitelist (S8)" → "management whitelist (S8, read from Vikunja config)". Keep "whitelist (S8)" where only the concept matters.
 
 - [ ] **Step 4: S9 story**
 
-In `docs/stories/S9-management-ui.md`:
+In `docs/stories/S9-management-ui.md`, references to "config whitelist (S8)" → "management whitelist (S8)". Keep "whitelist (S8)" where only the concept matters.
 
-- Line 14: `A whitelisted user (from the config whitelist, S8) can manage...` → `A whitelisted user (from the management whitelist, S8) can manage...`
-- Line 20: `gated by the config whitelist (S8)` → `gated by the management whitelist (S8)`.
-- Line 24 (Design Principles): `the UI is the whitelisted user's tool; it checks the whitelist (S8)...` → keep "whitelist (S8)" (concept, not mechanism).
+- [ ] **Step 5: Verify no stray mechanism references remain**
 
-- [ ] **Step 5: Verify no stray "config file" mechanism references remain**
-
-Run: `cd /mnt/data/nickp/Documents/Code/vikunja-projects/vikunja-custom-fields-plugin && grep -rn "config file" docs/stories/S8-config-whitelist.md docs/PRD.md docs/stories/S2-field-definition-api.md docs/stories/S9-management-ui.md`
-Expected: no matches referring to the whitelist *mechanism* (the PRD's `config.yml.sample` / config-package references, if any, are unrelated and fine; the whitelist mechanism should read "env var" or "whitelist" everywhere).
+Run: `cd /mnt/data/nickp/Documents/Code/vikunja-projects/vikunja-custom-fields-plugin && grep -rni "environment variable\|env var\|env-var" docs/stories/S8-config-whitelist.md docs/PRD.md docs/stories/S2-field-definition-api.md docs/stories/S9-management-ui.md`
+Expected: no matches describing the whitelist as an env var *only*. (Mentions of the env *override* alongside the config key are fine.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add docs/stories/S8-config-whitelist.md docs/PRD.md docs/stories/S2-field-definition-api.md docs/stories/S9-management-ui.md
-git commit -m "docs: switch whitelist mechanism wording from config file to env var"
+git commit -m "docs: name the customfields.whitelist config mechanism consistently"
 ```
 
 ---
@@ -588,12 +587,14 @@ git commit -m "docs: switch whitelist mechanism wording from config file to env 
 
 **Files:** none (git only)
 
+**STOP REASON:** Per the controller's standing ruling, this task's `git flow feature finish` (merge into `develop`) is a side effect on the shared integration branch. Execute Steps 1 and 4, then **PAUSE before Step 2** and confirm with the user before merging. The branch stays ready-to-finish.
+
 - [ ] **Step 1: Confirm all verification passed and the tree is clean**
 
 Run: `git status --short`
-Expected: clean (any temporary `compose.test.yml` edits from Task 5 were reverted).
+Expected: clean (any temporary `compose.test.yml` / `config.test.yml` edits from Task 5 were reverted).
 
-- [ ] **Step 2: Finish the feature branch into develop**
+- [ ] **Step 2: Finish the feature branch into develop** — ⏸ PAUSE FOR USER CONFIRMATION BEFORE THIS STEP
 
 Run: `git flow feature finish s8-config-whitelist`
 Expected: merges `feature/s8-config-whitelist` → `develop`, deletes the feature branch, switches to `develop`.
@@ -601,7 +602,7 @@ Expected: merges `feature/s8-config-whitelist` → `develop`, deletes the featur
 - [ ] **Step 3: Confirm**
 
 Run: `git rev-parse --abbrev-ref HEAD && git log --oneline -8`
-Expected: on `develop`; the S8 commits (whitelist parse, route, harness, docs) appear in history above the spec commit `4221e79`.
+Expected: on `develop`; the S8 commits (whitelist parse, route, config, harness, docs) appear in history above the spec/plan commits.
 
 - [ ] **Step 4: Update the critical-path checklist**
 
