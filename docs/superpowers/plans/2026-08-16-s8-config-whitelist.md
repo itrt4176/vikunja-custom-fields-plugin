@@ -91,7 +91,7 @@ Expected: the xormigrate refactor commit `4b2e3ff` and the custom-image commit `
 This task adds the load logic, the set, and the predicate. No route yet — that's Task 2, so the predicate can be reasoned about in isolation. The new base's `Init()` is trivial (tables are created by the migration); S8 prepends the whitelist load.
 
 **Files:**
-- Modify: `main.go` (add imports `strings`, `github.com/spf13/viper`, `code.vikunja.io/api/pkg/user`; add `whitelist` var, `loadWhitelist`, `IsManager`; call `loadWhitelist` in `Init`)
+- Modify: `main.go` (add imports `strings`, `github.com/spf13/viper`; add `whitelist` var, `loadWhitelist`, `IsManager`; call `loadWhitelist` in `Init`). Note: the `code.vikunja.io/api/pkg/user` import is NOT added here — it is unused until Task 2's `managerHandler`, and Go rejects unused imports (yaegi type-checks via `go/types`, so an unused import fails plugin load at import time). Task 2 adds `user` where it is first used.
 
 **Interfaces:**
 - Produces: `func IsManager(username string) bool`
@@ -129,7 +129,6 @@ import (
 
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
-	"code.vikunja.io/api/pkg/user"
 
 	"github.com/labstack/echo/v5"
 	"github.com/spf13/viper"
@@ -137,6 +136,8 @@ import (
 	"xorm.io/xorm"
 )
 ```
+
+(Note: `code.vikunja.io/api/pkg/user` is NOT added in this task — it is unused until Task 2's `managerHandler`, and Go rejects unused imports. Task 2 adds it where it is first used.)
 
 Then add the package-level set immediately above the `CustomFieldsPlugin` struct definition (after the `CustomFieldValue` / `TableName` block, before `type CustomFieldsPlugin struct{}`):
 
@@ -223,7 +224,7 @@ func (p *CustomFieldsPlugin) Init() error {
 
 - [ ] **Step 5: Re-read sanity check**
 
-There is no standalone `go build` for the plugin (imports resolve only inside the vikunja module). Re-read `main.go` to confirm: imports added (`strings`, `viper`, `user`), `whitelist` var declared, `loadWhitelist` and `IsManager` present, `Init()` calls `loadWhitelist()` first, and the S1 migration block / struct definitions / other factories are unchanged.
+There is no standalone `go build` for the plugin (imports resolve only inside the vikunja module). Re-read `main.go` to confirm: imports added (`strings`, `viper`) — and **no unused `user` import** (it is added in Task 2, not here), `whitelist` var declared, `loadWhitelist` and `IsManager` present, `Init()` calls `loadWhitelist()` first, and the S1 migration block / struct definitions / other factories are unchanged.
 
 - [ ] **Step 6: Commit**
 
@@ -239,7 +240,7 @@ git commit -m "feat: parse management whitelist from Vikunja config and expose I
 Adds the authenticated `/manager` route that proves the predicate resolves for the logged-in caller. Its doc comment records that it is temporary and must be removed once S2 exercises the predicate.
 
 **Files:**
-- Modify: `main.go` (add `managerHandler`, register the route in `RegisterAuthenticatedRoutes`)
+- Modify: `main.go` (add the `code.vikunja.io/api/pkg/user` import — first use; add `managerHandler`; register the route in `RegisterAuthenticatedRoutes`)
 
 **Interfaces:**
 - Consumes: `IsManager` (Task 1), `user.GetCurrentUser`, `echo.Context`
@@ -247,7 +248,48 @@ Adds the authenticated `/manager` route that proves the predicate resolves for t
 
 **Required Skills:** git-flow, golang-error-handling. **Recommended:** golang-naming, golang-code-style.
 
-- [ ] **Step 1: Add the handler**
+- [ ] **Step 1: Add the `user` import**
+
+Task 1 deliberately did not add `code.vikunja.io/api/pkg/user` (it was unused there and Go rejects unused imports). This task's `managerHandler` is the first use, so add it now. The current import block (after Task 1) is:
+
+```go
+import (
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"code.vikunja.io/api/pkg/log"
+	"code.vikunja.io/api/pkg/plugins"
+
+	"github.com/labstack/echo/v5"
+	"github.com/spf13/viper"
+	"src.techknowlogick.com/xormigrate"
+	"xorm.io/xorm"
+)
+```
+
+Add `"code.vikunja.io/api/pkg/user"` to the vikunja import group (after `plugins`):
+
+```go
+import (
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"code.vikunja.io/api/pkg/log"
+	"code.vikunja.io/api/pkg/plugins"
+	"code.vikunja.io/api/pkg/user"
+
+	"github.com/labstack/echo/v5"
+	"github.com/spf13/viper"
+	"src.techknowlogick.com/xormigate"
+	"xorm.io/xorm"
+)
+```
+
+- [ ] **Step 2: Add the handler**
 
 Add after the existing `healthHandler`:
 
@@ -268,7 +310,7 @@ func managerHandler(c *echo.Context) error {
 }
 ```
 
-- [ ] **Step 2: Register the route**
+- [ ] **Step 3: Register the route**
 
 The current `RegisterAuthenticatedRoutes` is:
 
@@ -287,11 +329,11 @@ func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
 }
 ```
 
-- [ ] **Step 3: Re-read for consistency**
+- [ ] **Step 4: Re-read for consistency**
 
-Confirm `managerHandler` is defined, the route is registered, `user` and `http` are imported (Task 1 added `user`; `http` was already imported in S1). No other changes needed.
+Confirm `managerHandler` is defined, the route is registered, and `user` is now imported (Step 1 added it — first use here) alongside `http` (already imported in S1). No other changes needed.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add main.go
