@@ -34,8 +34,8 @@ while ! curl -sf -o /dev/null "$BASE_URL/api/v2/info"; do
 done
 echo " ready"
 
-# ── Step 3: Seed test user ──────────────────────────────────────
-echo "==> Seeding test user..."
+# ── Step 3: Seed test users ─────────────────────────────────────
+echo "==> Seeding test users..."
 SEED_RESPONSE=$(curl -s -X PUT "$BASE_URL/api/v2/test/users?truncate=true" \
   -H "Authorization: $TESTING_TOKEN" \
   -H "Content-Type: application/json" \
@@ -48,41 +48,60 @@ SEED_RESPONSE=$(curl -s -X PUT "$BASE_URL/api/v2/test/users?truncate=true" \
     \"updated\": \"2026-08-08T00:00:00Z\",
     \"issuer\": \"local\",
     \"status\": 0
+  },{
+    \"id\": 2,
+    \"username\": \"otheruser\",
+    \"password\": \"\$2b\$10\$8.vLTS6/Ya5NCMHvP3ZiS.1shEBBsVJsTwYy8BET6B/a/zvLo/vQS\",
+    \"email\": \"other@localhost.local\",
+    \"created\": \"2026-08-08T00:00:00Z\",
+    \"updated\": \"2026-08-08T00:00:00Z\",
+    \"issuer\": \"local\",
+    \"status\": 0
   }]")
 
 if echo "$SEED_RESPONSE" | grep -qi "error"; then
-  echo "ERROR: Failed to seed test user: $SEED_RESPONSE"
+  echo "ERROR: Failed to seed test users: $SEED_RESPONSE"
   exit 1
 fi
-echo "   Test user created (username: $TEST_USER)"
+echo "   Test users created (managers: $TEST_USER; non-manager: otheruser)"
 
-# ── Step 4: Login ───────────────────────────────────────────────
+# ── Step 4: Login both users ──────────────────────────────────
+login_user() {
+  local user="$1" pass="$2"
+  local resp
+  resp=$(curl -s -X POST "$BASE_URL/api/v2/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\": \"$user\", \"password\": \"$pass\"}")
+  local tok
+  tok=$(echo "$resp" | jq -r '.token // empty')
+  if [ -z "$tok" ]; then
+    echo "ERROR: Failed to extract token for $user: $resp"
+    exit 1
+  fi
+  echo "$tok"
+}
+
 echo "==> Logging in..."
-LOGIN_RESPONSE=$(curl -s -X POST "$BASE_URL/api/v2/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\": \"$TEST_USER\", \"password\": \"$TEST_PASS\"}")
-
-JWT=$(echo "$LOGIN_RESPONSE" | jq -r '.token // empty')
-if [ -z "$JWT" ]; then
-  echo "ERROR: Failed to extract token from login response: $LOGIN_RESPONSE"
-  exit 1
-fi
-echo "   Logged in"
+JWT=$(login_user "$TEST_USER" "testpassword")
+JWT_OTHERUSER=$(login_user "otheruser" "testpassword")
+echo "   Logged in (testuser + otheruser)"
 
 # ── Step 5: Print result ────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Vikunja test instance ready                                 ║"
 echo "║                                                              ║"
-echo "║  Export this in your shell:                                  ║"
+echo "║  Whitelisted manager (is_manager should be true):            ║"
 echo "║    export JWT=\"$JWT\"                                       ║"
 echo "║                                                              ║"
-echo "║  Or use directly:                                            ║"
-echo "║    curl -s -H \"Authorization: Bearer $JWT\" \\              ║"
-echo "║      $BASE_URL/api/v1/your/api/endpoint | jq .               ║"
+echo "║  Non-whitelisted user (is_manager should be false):          ║"
+echo "║    export JWT_OTHERUSER=\"$JWT_OTHERUSER\"                   ║"
 echo "║                                                              ║"
-echo "║  Unauthenticated endpoint:                                   ║"
-echo "║    curl -s $BASE_URL/api/v2/info | jq .                      ║"
+echo "║  Verify the whitelist:                                       ║"
+echo "║    curl -s -H \"Authorization: Bearer \$JWT\" \\               ║"
+echo "║      $BASE_URL/api/v1/plugins/custom-fields/manager | jq .  ║"
+echo "║    curl -s -H \"Authorization: Bearer \$JWT_OTHERUSER\" \\     ║"
+echo "║      $BASE_URL/api/v1/plugins/custom-fields/manager | jq .  ║"
 echo "║                                                              ║"
 echo "║  Stop: docker compose -f compose.test.yml down               ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
