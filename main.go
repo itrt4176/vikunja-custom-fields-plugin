@@ -3,12 +3,15 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
+	"code.vikunja.io/api/pkg/user"
 
 	"github.com/labstack/echo/v5"
+	"github.com/spf13/viper"
 	"src.techknowlogick.com/xormigrate"
 	"xorm.io/xorm"
 )
@@ -38,6 +41,50 @@ type CustomFieldValue struct {
 
 func (CustomFieldValue) TableName() string { return "custom_field_values" }
 
+// whitelist holds the lowercase usernames permitted to manage custom fields.
+// Populated once in Init() from Vikunja's config (customfields.whitelist,
+// overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST env var); read-only
+// afterward, so it needs no synchronization.
+var whitelist map[string]struct{}
+
+// loadWhitelist reads the management whitelist from Vikunja's config
+// (the customfields.whitelist key, overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST
+// env var) and returns a lowercase-normalized set of permitted usernames. Source
+// is isolated here so a future swap to config.Key(...) is a one-function change.
+//
+// Malformed entries (empty after trimming, e.g. "alice,,bob") are logged and
+// skipped — never fatal. An absent/empty value yields an empty set (deny-all).
+func loadWhitelist() map[string]struct{} {
+	set := map[string]struct{}{}
+	raw := viper.GetString("customfields.whitelist")
+	if raw == "" {
+		log.Infof("[custom-fields] whitelist empty — no users may manage custom fields")
+		return set
+	}
+	for i, entry := range strings.Split(raw, ",") {
+		name := strings.ToLower(strings.TrimSpace(entry))
+		if name == "" {
+			log.Errorf("[custom-fields] whitelist: ignoring empty entry at position %d", i)
+			continue
+		}
+		set[name] = struct{}{}
+	}
+	log.Infof("[custom-fields] whitelist loaded: %d manager(s)", len(set))
+	return set
+}
+
+// IsManager reports whether username is on the management whitelist. It is the
+// single authorization check S2 (field-definition API) and S9 (management UI)
+// call before allowing field-definition changes. Deny-by-default: an empty
+// whitelist denies everyone. Comparison is case-insensitive.
+func IsManager(username string) bool {
+	if username == "" {
+		return false
+	}
+	_, ok := whitelist[strings.ToLower(username)]
+	return ok
+}
+
 // CustomFieldsPlugin is the main plugin struct. All capabilities (tables, routes)
 // are methods added to this struct in later tasks.
 type CustomFieldsPlugin struct{}
@@ -46,6 +93,7 @@ func (p *CustomFieldsPlugin) Name() string    { return "custom-fields" }
 func (p *CustomFieldsPlugin) Version() string { return "0.1.0" }
 
 func (p *CustomFieldsPlugin) Init() error {
+	whitelist = loadWhitelist()
 	log.Infof("[custom-fields] plugin v0.1.0 initialized")
 	return nil
 }
