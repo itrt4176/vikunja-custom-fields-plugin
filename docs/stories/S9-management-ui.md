@@ -11,13 +11,13 @@ position: 9
 
 ## Outcome
 
-A whitelisted user (from the config whitelist, S8) can manage custom field definitions through a web interface served by the plugin — no licensed admin panel required. They open the page in the browser, create fields, pick a type, set constraints, assign them to projects, and edit or delete them, all without leaving the browser.
+A whitelisted user (from the management whitelist, S8) can manage custom field definitions through a web interface served by the plugin — no licensed admin panel required. They open the page in the browser, create fields, pick a type, set constraints, assign them to projects, and edit or delete them, all without leaving the browser.
 
 ## What & Why
 
 The Field Definition API (S2) works, but requiring whitelisted users to manage fields through curl or an API client is a poor experience. This story provides a web interface served by the plugin that manages field definitions against the same database the API reads.
 
-This is a **temporary** stand-in. It is served from a plugin route so it bypasses Vikunja's licensed admin feature entirely. Authenticating through the user's existing Vikunja browser session, it is gated by the config whitelist (S8). A future epic replaces this with native custom-field management integrated into Vikunja's own interface, for both licensed and unlicensed instances.
+This is a **temporary** stand-in. It is served from a plugin route so it bypasses Vikunja's licensed admin feature entirely. Authenticating through the user's existing Vikunja browser session, it is gated by the management whitelist (S8). A future epic replaces this with native custom-field management integrated into Vikunja's own interface, for both licensed and unlicensed instances.
 
 ## Design Principles
 

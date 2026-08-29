@@ -1,6 +1,6 @@
 ---
 title: "Config Whitelist"
-description: "The config file defines which users are permitted to manage custom fields."
+description: "The customfields.whitelist config key defines which users are permitted to manage custom fields."
 status: pending
 priority: 70
 labels: ["backend", "configuration"]
@@ -11,7 +11,7 @@ position: 8
 
 ## Outcome
 
-An instance admin declares who may manage custom fields. A whitelist of usernames (or user identifiers) in Vikunja's config file defines the users permitted to create, edit, and delete field definitions. Users not on the whitelist cannot manage custom fields. No license or admin panel is involved.
+An instance admin declares who may manage custom fields. A whitelist of usernames (or user identifiers) in Vikunja's config (`customfields.whitelist`, overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var) defines the users permitted to create, edit, and delete field definitions. Users not on the whitelist cannot manage custom fields. No license or admin panel is involved.
 
 ## What & Why
 
@@ -33,7 +33,7 @@ The whitelist is consumed by any management surface: the field definition API (S
 
 ## Acceptance Criteria
 
-1. A whitelist of permitted users can be declared in Vikunja's config file.
+1. A whitelist of permitted users can be declared via the `customfields.whitelist` config key (overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var).
 2. A whitelisted user is allowed to manage custom fields.
 3. A user not on the whitelist is denied field-definition operations (checked by S2/S9).
 4. A malformed whitelist entry logs a clear error on startup but does not crash Vikunja.

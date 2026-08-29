@@ -17,7 +17,7 @@ A whitelisted user can manage custom field definitions through the plugin API: c
 
 This story builds the CRUD API for field definitions on top of the tables created in S1. Field definitions are the schema layer — they describe what custom fields exist, what type they are, what constraints they have, and which projects they're assigned to. Without them, there's nothing to attach values to.
 
-The API follows Vikunja's conventions for request/response shapes, authentication, and error handling. Access is governed by the config whitelist (S8): only users on the whitelist can manage field definitions. This deliberately bypasses Vikunja's licensed admin feature.
+The API follows Vikunja's conventions for request/response shapes, authentication, and error handling. Access is governed by the management whitelist (S8, read from Vikunja config): only users on the whitelist can manage field definitions. This deliberately bypasses Vikunja's licensed admin feature.
 
 ## Design Principles
 

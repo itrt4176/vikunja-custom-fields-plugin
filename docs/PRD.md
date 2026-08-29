@@ -48,7 +48,7 @@ As a stretch goal, fields can be marked "API-only" — read/write through the AP
 
 **Frontend patches** — Modifications to the Vue 3 frontend in our fork. The task detail view fetches and renders custom fields data-driven from the API response. No hardcoded field types — rendering is driven by the field definition, not the field name.
 
-**Config file** — A single responsibility: the whitelist of users permitted to manage custom fields. It is not a source of field definitions.
+**Config file** — A single responsibility: the whitelist of users permitted to manage custom fields, read from the `customfields.whitelist` config key (overridable by the `VIKUNJA_CUSTOMFIELDS_WHITELIST` env var). It is not a source of field definitions.
 
 **Future epic — native management.** Replace the temporary management UI with custom-field management integrated into Vikunja's own interface, for both licensed and unlicensed instances. This is the destination the temporary UI points toward; it is out of scope now.
 
