@@ -8,6 +8,7 @@ import (
 
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
+	"code.vikunja.io/api/pkg/user"
 
 	"github.com/labstack/echo/v5"
 	"github.com/spf13/viper"
@@ -132,7 +133,8 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 // RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
 // /api/v1/plugins/ group.
 func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
-	g.GET("/custom-fields/health", healthHandler)
+	g.GET("/custom-fields/health", healthHandler)   // S1 throwaway load-proof
+	g.GET("/custom-fields/manager", managerHandler) // S8 temporary, remove after S2
 }
 
 func healthHandler(c *echo.Context) error {
@@ -140,6 +142,21 @@ func healthHandler(c *echo.Context) error {
 		"name":    "custom-fields",
 		"version": "0.1.0",
 		"status":  "ok",
+	})
+}
+
+// managerHandler is a temporary S8 verification route: it proves the whitelist
+// predicate resolves correctly for the authenticated caller. It is not a
+// management surface — S2/S9 enforce IsManager on the real endpoints. Remove
+// this route once S2 is in place and the predicate is exercised there.
+func managerHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"username":   u.Username,
+		"is_manager": IsManager(u.Username),
 	})
 }
 
