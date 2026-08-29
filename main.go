@@ -8,7 +8,6 @@ import (
 
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/plugins"
-	"code.vikunja.io/api/pkg/user"
 
 	"github.com/labstack/echo/v5"
 	"github.com/spf13/viper"
