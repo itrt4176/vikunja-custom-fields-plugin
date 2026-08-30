@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"code.vikunja.io/api/pkg/log"
+	"code.vikunja.io/api/pkg/models"
 	"code.vikunja.io/api/pkg/plugins"
 	"code.vikunja.io/api/pkg/user"
 
@@ -140,6 +141,67 @@ func (e ErrCustomFieldNotFound) Error() string {
 type ErrCustomFieldGlobalConflict struct{}
 func (ErrCustomFieldGlobalConflict) Error() string {
 	return "a field is either global (all projects) or assigned to specific projects, not both"
+}
+
+// ── Validation (pure functions; Task 4). Tasks 7 and 8 call these before
+// writing a definition or its project assignments.
+
+var validFieldTypes = map[string]struct{}{
+	"text": {}, "textarea": {}, "integer": {}, "decimal": {},
+	"date": {}, "datetime": {}, "select": {}, "multiselect": {},
+	"checkbox": {}, "url": {},
+}
+
+func isSelectLike(t string) bool {
+	return t == "select" || t == "multiselect"
+}
+
+// validateDefinition checks the type/name/options/constraints of a definition.
+// It does no DB access. project assignment is validated separately
+// (validateAssignment) because that needs a session.
+func validateDefinition(d *CustomFieldDefinition, options []CustomFieldOption) error {
+	if strings.TrimSpace(d.Name) == "" {
+		return ErrCustomFieldNameEmpty{}
+	}
+	if _, ok := validFieldTypes[d.Type]; !ok {
+		return ErrCustomFieldInvalidType{Type: d.Type}
+	}
+	if len(options) > 0 && !isSelectLike(d.Type) {
+		return ErrCustomFieldOptionsForNonSelect{Type: d.Type}
+	}
+	seen := map[string]struct{}{}
+	for _, o := range options {
+		if strings.TrimSpace(o.Value) == "" {
+			return ErrCustomFieldInvalidConstraint{Detail: "option value must not be empty"}
+		}
+		if _, dup := seen[o.Value]; dup {
+			return ErrCustomFieldDuplicateOption{Value: o.Value}
+		}
+		seen[o.Value] = struct{}{}
+	}
+	if (d.FieldConfig.Min != nil || d.FieldConfig.Max != nil) && !(d.Type == "integer" || d.Type == "decimal") {
+		return ErrCustomFieldConstraintForType{Type: d.Type, Constraint: "min/max"}
+	}
+	if d.FieldConfig.Min != nil && d.FieldConfig.Max != nil && *d.FieldConfig.Min > *d.FieldConfig.Max {
+		return ErrCustomFieldInvalidConstraint{Detail: "min must not exceed max"}
+	}
+	return nil
+}
+
+// validateAssignment confirms each specific project exists. The global sentinel
+// (empty/nil projectIDs) needs no such check. Mixing sentinel with specific IDs
+// is a client error the handler prevents before calling here.
+func validateAssignment(s *xorm.Session, projectIDs []int64) error {
+	for _, pid := range projectIDs {
+		has, err := s.Table("projects").Where("id = ?", pid).Exist(&models.Project{})
+		if err != nil {
+			return fmt.Errorf("custom-fields: check project %d: %w", pid, err)
+		}
+		if !has {
+			return ErrCustomFieldProjectNotFound{ID: pid}
+		}
+	}
+	return nil
 }
 
 // whitelist holds the lowercase usernames permitted to manage custom fields.
