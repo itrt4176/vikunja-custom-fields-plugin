@@ -241,7 +241,108 @@ git diff --exit-code main.go   # must show no changes
 git status --short
 ```
 
-- [ ] **Step 8: Commit the spike result notes (not the throwaway code)**
+The spikes registered migration IDs `20260829170000-spike` and `20260829170100-spike2`.
+After restoring `main.go` these IDs vanish from `Migrations()`, but Vikunja's
+migrations table may still mark them applied. `run-test-env.sh` wipes and recreates
+the DB (including the migrations table) on each run, so the next restart self-heals
+— but to be safe, before the next restart drop the spike tables if they linger:
+
+```bash
+sqlite3 db/vikunja.db "DROP TABLE IF EXISTS spike_things; DROP TABLE IF EXISTS spike_recs;" 2>/dev/null || true
+```
+
+- [ ] **Step 8: Spike 3 — plugin event type passed to a host interface (the third reflect path)**
+
+The events seam depends on a yaegi path neither spike above exercises: a
+*plugin-defined* event struct implementing the host `events.Event` interface, passed
+into host `events.DispatchOnCommit(s, evt)`. yaegi must bridge an interpreted type
+to a host interface param — a distinct reflect risk from struct-field or
+session-arg reflection. If it fails, the entire S3 event seam is dead regardless of
+the C2 fix. Spike it now.
+
+Write a third throwaway `main.go` (the backup is already safe) with one extra route:
+
+```go
+package main
+
+import (
+	"net/http"
+
+	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/events"
+	"code.vikunja.io/api/pkg/plugins"
+	"github.com/labstack/echo/v5"
+	"src.techknowlogick.com/xormigrate"
+)
+
+type SpikeEvent struct{ Msg string }
+func (SpikeEvent) Name() string { return "spike.event" }
+
+type Spike3Plugin struct{}
+func (p *Spike3Plugin) Name() string    { return "spike3" }
+func (p *Spike3Plugin) Version() string { return "0.0.1" }
+func (p *Spike3Plugin) Init() error     { return nil }
+func (p *Spike3Plugin) Shutdown() error { return nil }
+func (p *Spike3Plugin) Migrations() []*xormigrate.Migration { return nil }
+func (p *Spike3Plugin) RegisterAuthenticatedRoutes(g *echo.Group) {
+	g.GET("/spike3/event", func(c *echo.Context) error {
+		s := db.NewSession()
+		defer s.Close()
+		events.DispatchOnCommit(s, &SpikeEvent{Msg: "hello"})
+		if err := s.Commit(); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"commit_err": err.Error()})
+		}
+		events.DispatchPending(c.Request().Context(), s)
+		return c.JSON(http.StatusOK, map[string]string{"dispatched": "spike.event"})
+	})
+}
+var spike3 = &Spike3Plugin{}
+func NewPlugin() plugins.Plugin { return spike3 }
+func NewAuthenticatedRouterPlugin() plugins.AuthenticatedRouterPlugin { return spike3 }
+func NewMigrationPlugin() plugins.MigrationPlugin { return spike3 }
+```
+
+Run:
+
+```bash
+./scripts/run-test-env.sh
+curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/plugins/spike3/event | jq .
+docker compose -f compose.test.yml logs 2>&1 | grep -iE "spike.event|panic|interface" | tail -5
+```
+
+- If the response is `{"dispatched":"spike.event"}` with no panic → **plugin event
+  types bridge to the host interface: Task 5 + Task 7's `DispatchOnCommit` calls
+  work.** Append `model-events: host-interface-ok` to `spike-result.md`.
+- If it panics/errors on the interface bridge (look for "cannot convert" /
+  "not an events.Event" / interface-assertion errors) → the events seam can't use
+  plugin-defined types under yaegi. **Stop and surface to the user** before
+  implementing Task 5: options include a host-defined event type the plugin
+  populates (if a suitable one is in the symbol table), or deferring the event seam
+  and noting it as a known gap for S3. Do not proceed with a dead seam.
+
+Restore and clean up after the spike:
+
+```bash
+cp "$CLAUDE_JOB_DIR/tmp/main.go.real-backup" main.go
+git diff --exit-code main.go
+```
+
+- [ ] **Step 9: Note the remaining unspiked reflect risks (taken on faith, watched during implementation)**
+
+The three spikes cover the highest-risk yaegi paths. These lower-risk paths are
+*taken on faith* — if any fails during implementation, spike it the same way:
+- `s.Find(&slice)` on a yaegi-interpreted slice (ReadOne/ReadAll) — distinct from
+  the `Get(&struct)` / `Insert(&struct)` the spikes exercise.
+- `s.Table(...).Insert(&[]CustomFieldProject{})` — inserting a yaegi-interpreted
+  slice (Create/Update assignment).
+- `c.Bind(&req)` into a struct with a nested `FieldConfig` (with `*float64`
+  pointer fields) — nested-struct JSON binding under yaegi.
+- `s.Table("projects").Where(...).Exist(&models.Project{})` — a *host*-type bean
+  through yaegi (vs the plugin-type beans in the spikes).
+- `.OrderBy(...)`, `.AllCols()`, `.UseBool()` chain methods — low risk, registered
+  via xorm, but unexercised by the spikes.
+
+- [ ] **Step 10: Commit the spike result notes (not the throwaway code)**
 
 The spikes themselves are throwaway (already restored). Commit only the recorded decisions so later tasks inherit them.
 
@@ -264,6 +365,33 @@ Expand the three struct definitions and modify the existing migration to `Sync2`
 **Interfaces:**
 - Consumes: spike-result `field_config: json|text+manual`
 - Produces: `CustomFieldDefinition`, `CustomFieldOption`, `CustomFieldProject`, `FieldConfig` types; `Migrations()` syncing four tables. Tasks 4–8 reference these exact names.
+
+> **If the Task 1 spike chose `text+manual` (rung 3/4):** use this variant of the
+> `CustomFieldDefinition` struct instead of the one below. The `FieldConfig` Go
+> type stays the same (for the API/JSON shape), but it is **not** the stored
+> column — a `FieldConfigRaw string \`xorm:"text null"\`` column holds the JSON,
+> and `FieldConfig` becomes a transient `xorm:"-"` field the model methods
+> marshal/unmarshal via `encoding/json`. This keeps the API + model shape
+> upstream-identical; only the storage mechanism differs (the S1 raw-DDL analog).
+> ```go
+> type CustomFieldDefinition struct {
+>     ID           int64       `xorm:"bigint autoincr not null unique pk" json:"id"`
+>     Name         string      `xorm:"varchar(255) not null" json:"name"`
+>     Type         string      `xorm:"varchar(50) not null" json:"type"`
+>     Description  string      `xorm:"varchar(500) null" json:"description,omitempty"`
+>     FieldConfigRaw string    `xorm:"text null" json:"-"`                 // stored JSON
+>     FieldConfig  FieldConfig `xorm:"-" json:"field_config"`              // transient; marshaled in methods
+>     DisplayOrder int         `xorm:"int not null default 0" json:"display_order"`
+>     Created      time.Time   `xorm:"created not null" json:"-"`
+>     Updated      time.Time   `xorm:"updated not null" json:"-"`
+> }
+> ```
+> Then in Task 7, `Create`/`Update` must `json.Marshal(d.FieldConfig)` into
+> `d.FieldConfigRaw` before writing, and `ReadOne`/`ReadAll` must
+> `json.Unmarshal([]byte(d.FieldConfigRaw), &d.FieldConfig)` after reading. Add
+> those marshal/unmarshal lines exactly where the `json` variant does a plain
+> insert/get — the rest of the method bodies are identical. If the spike picked
+> `json` (rung 1), ignore this entire note and use the struct below as written.
 
 - [ ] **Step 1: Replace the two S1 structs with the three expanded/new ones + FieldConfig**
 
@@ -715,9 +843,10 @@ The DB layer. Each method takes `*xorm.Session` + `*user.User`, does the xorm wo
   `func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error)`
   `func (d *CustomFieldDefinition) ReadOne(s *xorm.Session) (*CustomFieldDefinition, []CustomFieldOption, []int64, error)`
   `func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error)`
-  `func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error)`
+  `func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64, old *CustomFieldDefinition) (*CustomFieldDefinition, error)`
   `func (d *CustomFieldDefinition) Delete(s *xorm.Session) error`
-  (If spike-2 chose free-functions, make these package-level with `d` as a leading param.)
+  Each Create/Update/Delete method calls `events.DispatchOnCommit(s, evt)` before returning; the Task 8 handler calls `events.DispatchPending(ctx, s)` after `s.Commit()` and `events.CleanupPending(s)` on any error path.
+  (If spike-2 chose free-functions, make these package-level with `d`/`old` as leading params.)
 
 - [ ] **Step 1: Add Create**
 
@@ -763,6 +892,8 @@ func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []
 	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
 		return nil, fmt.Errorf("custom-fields: insert assignment: %w", err)
 	}
+	// Queue the created event; the handler dispatches it after Commit.
+	events.DispatchOnCommit(s, &FieldDefinitionCreatedEvent{Definition: d})
 	return d, nil
 }
 ```
@@ -822,13 +953,13 @@ func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error) 
 
 ```go
 // Update replaces the definition and its options + assignment wholesale (PUT
-// full-replace). It does NOT touch custom_field_values (S3's table). Dispatches
-// FieldDefinitionUpdatedEvent(old+new) — the handler fires it on commit.
-func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
-	var old CustomFieldDefinition
-	has, err := s.Table("custom_field_definitions").ID(d.ID).Get(&old)
+// full-replace). It does NOT touch custom_field_values (S3's table). Queues
+// FieldDefinitionUpdatedEvent(old+new) via DispatchOnCommit; the handler dispatches
+// after Commit. `old` is the pre-mutation state the handler captured for the event.
+func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64, old *CustomFieldDefinition) (*CustomFieldDefinition, error) {
+	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
 	if err != nil {
-		return nil, fmt.Errorf("custom-fields: get old definition: %w", err)
+		return nil, fmt.Errorf("custom-fields: check old definition: %w", err)
 	}
 	if !has {
 		return nil, ErrCustomFieldNotFound{ID: d.ID}
@@ -839,7 +970,12 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 	if err := validateAssignment(s, projectIDs); err != nil {
 		return nil, err
 	}
-	if _, err := s.Table("custom_field_definitions").ID(d.ID).Update(d); err != nil {
+	// AllCols writes every column including zero values (xorm's Update skips
+	// zero-valued cols by default, which would break PUT full-replace for
+	// cleared fields, display_order=0, field_config.required=false, etc.).
+	// UseBool ensures the bools inside FieldConfig are not skipped either.
+	// (Mirrors upstream label.go's explicit .Cols(...) approach.)
+	if _, err := s.Table("custom_field_definitions").ID(d.ID).AllCols().UseBool().Update(d); err != nil {
 		return nil, fmt.Errorf("custom-fields: update definition: %w", err)
 	}
 	// Replace options wholesale.
@@ -866,16 +1002,11 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
 		return nil, fmt.Errorf("custom-fields: re-insert assignment: %w", err)
 	}
-	d.FieldConfig = old.FieldConfig // not used downstream; kept for event fidelity
+	// Queue the updated event with old + new state; handler dispatches after Commit.
+	events.DispatchOnCommit(s, &FieldDefinitionUpdatedEvent{Old: old, New: d})
 	return d, nil
 }
 ```
-
-> Note: store the old definition for the event before the Update. The handler will
-> capture `old` via a separate read or by having Update return it; simplest: have
-> the handler read `old` before calling Update and pass it when dispatching. See
-> Task 8 Step 4. (If you prefer Update to return `old`, add a `*CustomFieldDefinition`
-> out-param; either is acceptable — pick one and keep it consistent.)
 
 - [ ] **Step 4: Add Delete**
 
@@ -900,6 +1031,8 @@ func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	if _, err := s.Table("custom_field_definitions").ID(d.ID).Delete(&CustomFieldDefinition{}); err != nil {
 		return fmt.Errorf("custom-fields: delete definition: %w", err)
 	}
+	// Queue the deleted event; the handler dispatches it after Commit.
+	events.DispatchOnCommit(s, &FieldDefinitionDeletedEvent{DefinitionID: d.ID})
 	return nil
 }
 ```
@@ -1002,19 +1135,24 @@ func createHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanCreate(s, u)
 	if err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
 	created, err := d.Create(s, u, req.Options, req.ProjectIDs)
 	if err != nil {
+		events.CleanupPending(s)
 		return toHTTPError(err)
 	}
+	// Create queued the event via DispatchOnCommit; commit, then dispatch it.
 	if err := s.Commit(); err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchOnCommit(s, &FieldDefinitionCreatedEvent{Definition: created})
+	events.DispatchPending(c.Request().Context(), s)
 	return c.JSON(http.StatusCreated, definitionResponse{
 		CustomFieldDefinition: *created,
 		Options:               req.Options,
@@ -1031,7 +1169,7 @@ func readOneHandler(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
 	}
-	id, err := strconv.ParseInt(c.PathParam("id"), 10, 64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
 	}
@@ -1091,7 +1229,7 @@ func updateHandler(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
 	}
-	id, err := strconv.ParseInt(c.PathParam("id"), 10, 64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
 	}
@@ -1107,22 +1245,27 @@ func updateHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanUpdate(s, u)
 	if err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
-	// Capture old state for the event before mutation.
+	// Capture old state for the event before mutation. Update will queue the
+	// FieldDefinitionUpdatedEvent{Old, New} via DispatchOnCommit.
 	var old CustomFieldDefinition
 	_ = s.Table("custom_field_definitions").ID(id).Get(&old) // best-effort; event is informational
-	updated, err := d.Update(s, u, req.Options, req.ProjectIDs)
+	updated, err := d.Update(s, u, req.Options, req.ProjectIDs, &old)
 	if err != nil {
+		events.CleanupPending(s)
 		return toHTTPError(err)
 	}
 	if err := s.Commit(); err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchOnCommit(s, &FieldDefinitionUpdatedEvent{Old: &old, New: updated})
+	events.DispatchPending(c.Request().Context(), s)
 	return c.JSON(http.StatusOK, definitionResponse{
 		CustomFieldDefinition: *updated,
 		Options:               req.Options,
@@ -1135,7 +1278,7 @@ func deleteHandler(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
 	}
-	id, err := strconv.ParseInt(c.PathParam("id"), 10, 64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
 	}
@@ -1144,18 +1287,23 @@ func deleteHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanDelete(s, u)
 	if err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
+	// Delete queues FieldDefinitionDeletedEvent{DefinitionID} via DispatchOnCommit.
 	if err := d.Delete(s); err != nil {
+		events.CleanupPending(s)
 		return toHTTPError(err)
 	}
 	if err := s.Commit(); err != nil {
+		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchOnCommit(s, &FieldDefinitionDeletedEvent{DefinitionID: id})
+	events.DispatchPending(c.Request().Context(), s)
 	return c.NoContent(http.StatusNoContent)
 }
 ```
@@ -1210,32 +1358,30 @@ Seed a project so the assignment-validation AC can run, then execute the full ac
 
 - [ ] **Step 1: Add a project-seed step to run-test-env.sh**
 
-Insert after the users seed block (after the `if echo "$SEED_RESPONSE" | grep -qi "error"` block, before Step 4 login):
+Seed the project via the real `POST /api/v2/projects` endpoint (with the manager JWT) rather than raw-row seeding via the testing token. The `projects` table has version-dependent NOT-NULL columns and defaults that the API sets correctly but a hand-built PUT row may not — using the API avoids constraint failures. Insert after the login block (Step 4), so `$JWT` is available:
 
 ```bash
-# ── Step 3.5: Seed a test project (owned by testuser) ──────────
-echo "==> Seeding test project..."
-PROJECT_RESPONSE=$(curl -s -X PUT "$BASE_URL/api/v2/test/projects?truncate=true" \
-  -H "Authorization: $TESTING_TOKEN" \
+# ── Step 5: Seed a test project (for assignment-validation ACs) ──
+echo "==> Creating a test project via the API..."
+PROJECT_RESPONSE=$(curl -s -X POST "$BASE_URL/api/v2/projects" \
+  -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
-  -d "[{
-    \"id\": 1,
-    \"title\": \"Test Project\",
-    \"owner_id\": 1,
-    \"created\": \"2026-08-08T00:00:00Z\",
-    \"updated\": \"2026-08-08T00:00:00Z\"
-  }]")
-if echo "$PROJECT_RESPONSE" | grep -qi "error"; then
-  echo "WARNING: project seed response: $PROJECT_RESPONSE"
+  -d '{"title": "Test Project"}')
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | jq -r .id)
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+  echo "WARNING: project create response: $PROJECT_RESPONSE"
+else
+  echo "   Test project created (id $PROJECT_ID)"
 fi
-echo "   Test project created (id 1)"
+export PROJECT_ID
 ```
 
-> The exact column set for `projects` may differ across Vikunja versions; if the
-> seed returns a schema error, run `sqlite3 db/vikunja.db "PRAGMA table_info(projects);"`
-> and adjust the JSON keys to match the actual columns (owner_id vs owner_id,
-> title vs title). The point is to have one project with id 1 that
-> `validateAssignment` finds via `models.Project`.
+> The created project's id is assigned by the API (auto-increment, likely 1 on a
+> fresh DB) and exported as `$PROJECT_ID`. Use `$PROJECT_ID` in the
+> assignment-validation curls below instead of hardcoding `1`. If the create fails
+> (e.g. the v2 project-create shape differs), inspect `sqlite3 db/vikunja.db
+> "PRAGMA table_info(projects);"` and the v2 projects route at
+> `pkg/routes/api/v2/projects.go` for the correct body shape.
 
 - [ ] **Step 2: Restart and confirm the project seeded**
 
@@ -1248,27 +1394,30 @@ Expected: a row with id 1.
 - [ ] **Step 3: AC#1 — create a definition (whitelisted user)**
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
-  -d '{"name":"Cost Center","type":"select","field_config":{"required":true,"default":"draft"},"display_order":3,"options":[{"value":"draft","label":"Draft","display_order":0},{"value":"final","label":"Final","display_order":1}],"project_ids":[1]}' \
-  http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions | jq .
+ID=$(curl -s -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+  -d '{"name":"Cost Center","type":"select","field_config":{"required":true,"default":"draft"},"display_order":3,"options":[{"value":"draft","label":"Draft","display_order":0},{"value":"final","label":"Final","display_order":1}],"project_ids":['"$PROJECT_ID"']}' \
+  http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions | jq -r .id)
+export ID
+echo "created id=$ID"
+curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/$ID | jq .
 ```
-Expected: HTTP 201; response has `id`, `name`, `field_config`, `options` (2), `project_ids` `[1]`.
+Expected: `$ID` is a non-empty number; the follow-up GET shows `name` Cost Center, `field_config`, `options` (2), `project_ids` `[1]`. (This `$ID` is reused in Steps 5 and 6.)
 
 - [ ] **Step 4: AC#2 — list (unfiltered and by project)**
 
 ```bash
 curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions | jq .
-curl -s -H "Authorization: Bearer $JWT" "http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions?project_id=1" | jq .
+curl -s -H "Authorization: Bearer $JWT" "http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions?project_id=$PROJECT_ID" | jq .
 ```
-Expected: bare JSON array; the second contains the Cost Center field. Then create a global field and confirm it appears under `?project_id=1`:
+Expected: bare JSON array; the second contains the Cost Center field. Then create a global field and confirm it appears under `?project_id=$PROJECT_ID`:
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
   -d '{"name":"Global Note","type":"text","project_ids":[]}' \
   http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions | jq .
-curl -s -H "Authorization: Bearer $JWT" "http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions?project_id=1" | jq '.[] | .name'
+curl -s -H "Authorization: Bearer $JWT" "http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions?project_id=$PROJECT_ID" | jq '.[] | .name'
 ```
-Expected: both `Cost Center` and `Global Note` appear under project 1.
+Expected: both `Cost Center` and `Global Note` appear under project $PROJECT_ID.
 
 - [ ] **Step 5: AC#3 — update (PUT full-replace)**
 
@@ -1298,9 +1447,9 @@ Expected: 204; the three counts are 0; `custom_field_values` count is 0 (untouch
 ```bash
 curl -s -o /dev/null -w "POST:%{http_code}\n" -X POST -H "Authorization: Bearer $JWT_OTHERUSER" -H "Content-Type: application/json" -d '{"name":"x","type":"text"}' http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions
 curl -s -o /dev/null -w "GET:%{http_code}\n" -H "Authorization: Bearer $JWT_OTHERUSER" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions
-curl -s -o /dev/null -w "GET1:%{http_code}\n" -H "Authorization: Bearer $JWT_OTHERUSER" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/1
-curl -s -o /dev/null -w "PUT:%{http_code}\n" -X PUT -H "Authorization: Bearer $JWT_OTHERUSER" -H "Content-Type: application/json" -d '{"name":"x","type":"text"}' http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/1
-curl -s -o /dev/null -w "DELETE:%{http_code}\n" -X DELETE -H "Authorization: Bearer $JWT_OTHERUSER" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/1
+curl -s -o /dev/null -w "GET1:%{http_code}\n" -H "Authorization: Bearer $JWT_OTHERUSER" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/$ID
+curl -s -o /dev/null -w "PUT:%{http_code}\n" -X PUT -H "Authorization: Bearer $JWT_OTHERUSER" -H "Content-Type: application/json" -d '{"name":"x","type":"text"}' http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/$ID
+curl -s -o /dev/null -w "DELETE:%{http_code}\n" -X DELETE -H "Authorization: Bearer $JWT_OTHERUSER" http://127.0.0.1:4176/api/v1/plugins/custom-fields/definitions/$ID
 ```
 Expected: all five are `403`.
 

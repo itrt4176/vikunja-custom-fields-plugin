@@ -38,7 +38,8 @@ The API follows Vikunja's conventions for request/response shapes, authenticatio
 3. A whitelisted user can update a field definition's properties (name, type, constraints, project assignment).
 4. A whitelisted user can delete a field definition.
 5. Users not on the whitelist receive an authorization error when attempting any field definition operation.
-6. Field definitions are validated: type must be one of the supported types, name must be non-empty and unique within a project, constraints must be valid for the chosen type.
+6. Field definitions are validated: type must be one of the supported types, name must be non-empty, constraints must be valid for the chosen type.
+   > **Amended 2026-08-29:** the original "unique within a project" requirement was dropped. The name is a display label — field values join by `definition_id`, never by name — so name uniqueness is not a data-integrity requirement. This matches upstream Vikunja convention, where no reusable named entity (labels, teams, saved filters) enforces name uniqueness. The "two fields with the same name is confusing" worry is a management-time concern left to the management UI (S9), not an API-level constraint. See the S2 design spec for the full rationale.
 7. The API response shapes follow Vikunja conventions (snake_case, consistent envelope).
 
 ## Scope

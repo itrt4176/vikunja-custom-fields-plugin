@@ -69,9 +69,10 @@ specific" is **sentinel `ProjectID` values**:
 - `TaskCollection.ProjectID = 0` = "tasks from all projects" (`saved_filters.go:65`).
 - M2M join tables (`team_projects`, `users_projects`, `task_assignees`,
   `label_tasks`) share a shape: autoincr PK, two `bigint INDEX not null` FKs,
-  `created`/`updated`, optional `Permission`. Dedup is enforced in code, not by a
-  composite unique index. Hard FK constraints are not used anywhere (S1's spec
-  already calls its FK "FK-ish; no hard constraint (portable)").
+  `created` (and usually `updated` — though `label_tasks` has only `created`),
+  optional `Permission`. Dedup is enforced in code, not by a composite unique
+  index. Hard FK constraints are not used anywhere (S1's spec already calls its FK
+  "FK-ish; no hard constraint (portable)").
 
 **Decision:** a `custom_field_projects` M2M table in the `team_projects` shape,
 where a sentinel `project_id = 0` row means "all projects" and specific rows mean
@@ -364,8 +365,15 @@ Create/Update body:
 
 Response (single, on create/read/update): the full definition with its resolved
 relations (`field_config`, `options`, `project_ids` — `[]` for global). ReadAll
-returns a bare array (Vikunja's list convention — confirm against a native list
-endpoint in the spike; flagged as the one shape to verify).
+returns a **bare JSON array** at the top level — this is Vikunja's v2 list
+convention (e.g. `GET /api/v2/labels` returns `[{...}, {...}]`, not an
+envelope-wrapped object). AC#7's "consistent envelope" is satisfied by the
+single-resource responses (the object shape is consistent across create/read/
+update) and the list being a bare array; there is no shared `{data: [...]}` wrapper
+to add, since the plugin hand-rolls these responses and a native v2 list is a bare
+array. (Verify the bare-array shape against a native v2 list endpoint during the
+Task 1 spike — `curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/labels | jq 'type'`
+should be `"array"`.)
 
 ### Authorization (the permissions layer)
 
@@ -408,9 +416,11 @@ doesn't collide).
 ### The S3 seams (built now, per "maximally accommodating future S3 decisions")
 
 - **Events dispatched on commit:** `FieldDefinitionCreatedEvent`,
-  `FieldDefinitionUpdatedEvent` (old+new state), `FieldDefinitionDeletedEvent` —
-  via `events.DispatchOnCommit(s, ...)` (events is in the symbol table). S3 wires
-  listeners; S2 registers none.
+  `FieldDefinitionUpdatedEvent` (old+new state), `FieldDefinitionDeletedEvent`.
+  Queue via `events.DispatchOnCommit(s, evt)` in the model method (before return);
+  dispatch via `events.DispatchPending(ctx, s)` in the handler after `s.Commit()`;
+  cancel via `events.CleanupPending(s)` on any error/rollback path. (events is in
+  the symbol table.) S3 wires listeners; S2 registers none.
 - **Guard insertion points:** `CanUpdate` and `CanDelete` are where a future
   "block if values exist" check slots in — the model method is the natural place,
   so S3 adds it without touching handlers. A one-line comment marks the point.
@@ -487,9 +497,18 @@ func (FieldDefinitionDeletedEvent) Name() string { return "customfieldef.deleted
   listener) can diff what changed without a separate read.
 - `Deleted` carries the ID (not the struct — the row's gone) so S3's listener can
   cascade values by `definition_id`.
-- Dispatched on commit via `events.DispatchOnCommit` — listeners run after the
-  transaction commits, matching `TaskDeletedEvent`/`ProjectDeletedEvent`. S2
-  registers no listeners; it only dispatches.
+- **Dispatch mechanism (corrected — see the verified-facts section):**
+  `events.DispatchOnCommit(key, event)` only *queues* the event in a `pendingEvents`
+  map keyed by the session; it does **not** dispatch. The real upstream pattern is a
+  two-call split (verified at `pkg/models/tasks.go:2072` + `pkg/routes/api/v2/admin_projects.go:116`):
+  1. The **model method** calls `events.DispatchOnCommit(s, event)` *before*
+     returning (while the session is still open).
+  2. The **handler** calls `s.Commit()`; on success it calls
+     `events.DispatchPending(c.Request().Context(), s)` to actually publish the
+     queued events. On any error/rollback path it calls `events.CleanupPending(s)`
+     to drop the queued events (otherwise the `pendingEvents` map entry leaks).
+  This mirrors `TaskDeletedEvent`/`ProjectDeletedEvent`. S2 registers no listeners;
+  it only queues + dispatches.
 
 ## Testing strategy
 
