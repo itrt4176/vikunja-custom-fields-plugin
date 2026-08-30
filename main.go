@@ -524,27 +524,36 @@ func validateProjectIDList(ids []int64) error {
 // toHTTPError translates plugin-local errors to echo HTTP errors. web.HTTPError
 // is unavailable to yaegi, so this uses echo.NewHTTPError(code, message).
 func toHTTPError(err error) error {
-	switch err.(type) {
-	case ErrCustomFieldNameEmpty:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldInvalidType:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldOptionsForNonSelect:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldDuplicateOption:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldConstraintForType:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldInvalidConstraint:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldProjectNotFound:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldGlobalConflict:
-		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-	case ErrCustomFieldNotFound:
-		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	msg := err.Error()
+	// yaegi wraps interpreted errors as interp._error, so switch err.(type) never
+	// matches — discriminate by message prefix instead. Messages are stable
+	// constants from our error types; wrapped DB errors start with "custom-fields:"
+	// and fall to the 500 default. Upstream conversion: revert to switch err.(type)
+	// (type assertions work in native Go). Second yaegi deviation: a switch-true
+	// case list ("case a, b, c:") evaluates only its first expression, so each
+	// prefix gets its own case clause.
+	switch {
+	case strings.HasPrefix(msg, "custom field definition ") && strings.Contains(msg, " not found"):
+		return echo.NewHTTPError(http.StatusNotFound, msg)
+	case strings.HasPrefix(msg, "custom field name must not be empty"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "invalid custom field type:"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "options are only allowed for select/multiselect"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "duplicate option value:"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "constraint "):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "invalid constraint:"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "project ") && strings.Contains(msg, " does not exist"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "a field is either global"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	default:
+		return echo.NewHTTPError(http.StatusInternalServerError, msg)
 	}
-	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 }
 
 func createHandler(c *echo.Context) error {
