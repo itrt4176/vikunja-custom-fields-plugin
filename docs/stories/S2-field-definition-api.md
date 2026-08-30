@@ -1,7 +1,7 @@
 ---
 title: "Field Definition API"
 description: "Whitelisted users can create, read, update, and delete custom field definitions via the plugin API."
-status: pending
+status: done
 priority: 80
 labels: ["backend", "api"]
 position: 2
@@ -56,3 +56,37 @@ The API follows Vikunja's conventions for request/response shapes, authenticatio
 - Any frontend task-detail changes — S5
 - Soft-delete or archival of fields
 - "API-only" field flag — defer to S3
+
+## Resolution
+
+**Status:** Done. All 7 acceptance criteria pass on the Docker test instance (SQLite), verified end-to-end with `curl` + JWTs for both a whitelisted manager (`testuser`) and a non-whitelisted user (`otheruser`). Branch `feature/s2-field-definition-api-design` (git-flow, off `develop`); not yet merged. Full design in `docs/superpowers/specs/2026-08-29-s2-field-definition-api-design.md`; task-by-task plan in `docs/superpowers/plans/2026-08-29-s2-field-definition-api.md`.
+
+### How it was built
+
+A single-file yaegi plugin (`main.go`) with internal layering that mirrors Vikunja's model/permissions/handler split, so upstreaming is a mechanical move (register the same methods with `pkg/web/handler`, swap the route prefix). Three tables: `custom_field_definitions` (expanded from S1), `custom_field_options` (select option rows), `custom_field_projects` (assignment M2M, `project_id=0` sentinel = "all projects"). The S1 migration was modified in place (pattern B — unreleased feature, `project_views` precedent); it `Sync2`s all four tables via explicit-table form (`tx.Table(name).Sync2(&T{})`).
+
+Five endpoints under `/api/v1/plugins/custom-fields/definitions[/:id]`: POST (create), GET (list, optional `?project_id=` filter), GET/:id, PUT (full-replace), DELETE. Authorization: every handler calls `CanX` → `IsManager` → 403 for non-whitelisted users. Validation: type/name/options/constraints/project-assignment checks return 400 (404 for not-found). The temporary S8 `managerHandler` route was removed; `IsManager` is now exercised on the real endpoints.
+
+### Notable deviations from the original design (all grounded in spike evidence)
+
+1. **Events seam deferred.** The spec originally specified on-commit events (`FieldDefinition{Created,Updated,Deleted}Event`) as a seam for S3. Task 1 spike 3 found that **plugin-defined event types cannot be published under yaegi**: the interpreted struct bridges to the host `events.Event` interface (`DispatchOnCommit` queues it, `Name()` is called), but the host's `json.Marshal(event)` fails on the yaegi method-bridge field (`json: unsupported type: func() string`), so the event is never published and listeners receive nothing (HTTP 200 masks it). A host-defined event type works end-to-end (spike 3b proved `models.TaskUpdatedEvent`), but no host custom-field event type exists, so that path needs a fork core change + image rebuild. Decision (user): **defer the seam** rather than add core event types — keep S2 a zero-core-change proving ground. S3 will provide its own value-cleanup trigger. No `events.*` calls, no `pkg/events` import. The reference event design + the verified two-call dispatch mechanism are retained in the spec for whatever S3 builds.
+
+2. **Response shapes are hand-built maps, not serialized structs.** Spike 1 found interpreted structs serialize as `{}` through `c.JSON`/`encoding/json` (yaegi wrapper fields aren't json-visible). Handlers build response maps field-by-field (`definitionToMap`/`definitionFieldsMap`/`fieldConfigMap`); xorm DB read/write of interpreted structs works fine (only the HTTP `c.JSON` path is affected).
+
+3. **`toHTTPError` discriminates by message prefix, not type assertion.** `switch err.(type)` never matches under yaegi (interpreted errors wrap as `interp._error`); `toHTTPError` was rewritten to match `err.Error()` prefixes via `strings.HasPrefix` (404 for not-found, 400 for the 8 validation errors, 500 default for wrapped DB errors). A second yaegi deviation: the multi-expression `case a, b, c:` form evaluates only the first expression under yaegi, so each prefix is its own `case` clause. Both are documented yaegi workarounds — upstream conversion reverts to `switch err.(type)`.
+
+### Key decisions (from the spec, grounded in upstream evidence)
+
+- **`field_config` as `xorm:"json null"`** (typed `FieldConfig` struct) — matches `api_tokens.APIPermissions`; spike 1 confirmed it round-trips under yaegi (TEXT under sqlite, JSON/JSONB under mysql/postgres).
+- **No name uniqueness** — matches labels/teams/saved-filters; the name is a display label, values join by `definition_id`. AC#6 was amended to drop "unique within a project."
+- **Hard-delete own rows, defer values to S3** — `Delete` cascades definition + options + assignment in one transaction; it does NOT touch `custom_field_values` (S3's table). Matches the team-style manual cascade; no soft-delete (reserved for Task content).
+- **PUT only** (full-replace); PATCH deferred to upstreaming (`EnableAutoPatch` generates it correctly against huma; echo binding can't do merge-patch).
+- **`*user.User` not `web.Auth`** in `CanX`/model signatures — `web` is unavailable to yaegi; an upstream-conversion point.
+- **Modify the S1 migration in place** — unreleased feature, one upstream PR; the append-only switch fires when the plugin runs in production.
+
+### What was left open (deferred, triaged in the final review)
+
+- The **S3 event seam** (above) — S3 builds its own value-cleanup trigger; `CanUpdate`/`CanDelete` are clean guard-insertion points for a future "block if values exist" check.
+- **10 deferred minors** (none block merge; recorded in the plan's progress ledger): PR#3549/#3501 comment citation; raw-vs-trimmed option-value duplicate detection; N `Exist` queries in `validateAssignment`; broad `"constraint "` prefix in `toHTTPError`; `fieldConfigMap` omits nil Min/Max (by design); `export PROJECT_ID` surfacing; warn-on-null in the test script; the vacuous "values untouched" AC#4 evidence (no values exist in S2 — S3 should seed one to make it falsifiable). Two were fixed before merge: `gofmt` and option-PK zeroing in `setOptions` (a crafted `{"id":999}` body would otherwise attempt a PK insert — now discarded).
+- **`created`-timestamp preservation** confirmed: xorm's `created` tag is insert-only; `updated` bumps on PUT, `created` unchanged (spot-checked).
+- **How production-era append-migrations translate upstream** — TBD when the feature upstreams.
