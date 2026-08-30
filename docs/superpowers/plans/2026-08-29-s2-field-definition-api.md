@@ -21,7 +21,10 @@
 - **Plugin route prefix** is `/api/v1/plugins/custom-fields/...`. No v2 plugin mechanism.
 - **Whitelist**: `customfields.whitelist: "testuser"` (config.test.yml) — `testuser` is a manager, `otheruser` is not. Both JWTs are printed by `run-test-env.sh` (`$JWT`, `$JWT_OTHERUSER`).
 - **Verbs**: POST create, GET list/read, PUT update (full-replace), DELETE. No PATCH (deferred to upstreaming).
-- **`field_config` storage is spike-dependent** (Task 1 decides): `xorm:"json null"` (preferred) or `text null` + manual marshal (fallback). Task 2 adopts the spike outcome.
+- **`field_config` storage** — Task 1 spike chose `xorm:"json null"` (rung 1 round-trips under yaegi, including `*float64`). Task 2 uses `xorm:"json null"` as written; the `text+manual` fallback variant is NOT used.
+- **Model layer** — Task 1 spike chose **methods-on-struct**. Task 7 uses methods on `CustomFieldDefinition` as written (not free-functions).
+- **Events: DEFERRED** (Task 1 spike 3). Plugin-defined event types are unmarshalable by host `json.Marshal` under yaegi, so they're never published. User chose to defer rather than add host-defined event types to the fork. **Task 5 (Events) is SKIPPED.** Tasks 7 and 8 do NOT call `events.DispatchOnCommit`/`DispatchPending`/`CleanupPending` and do NOT import `pkg/events`. S2 registers no events.
+- **Response serialization** (Task 1 spike 1 caveat) — interpreted structs serialize as `{}` through `c.JSON`; handlers build **response maps** field-by-field, never echo an interpreted struct. xorm DB read/write of interpreted structs works fine.
 - **Conventional Commits**; branch `feature/s2-field-definition-api-design` (already started via `git flow feature start`). Do not commit to `develop`.
 
 ## File Structure
@@ -37,10 +40,10 @@ All work is in **`main.go`** (single file) plus one harness script edit:
 | `Migrations()` (modified) | `Sync2` all four tables | 2 |
 | Custom error types + `ErrCode*` consts | validation/auth errors (9000s range) | 3 |
 | `validate*` pure funcs | type/name/options/constraints/assignment checks | 4 |
-| Event types + `Name()` | `customfieldef.created/.updated/.deleted` | 5 |
+| Event types + `Name()` | **SKIPPED** — events deferred (spike 3) | 5 |
 | `CanCreate/CanRead/CanUpdate/CanDelete` | wrap `IsManager` | 6 |
-| `Create/ReadAll/ReadOne/Update/Delete` | DB CRUD on a `*xorm.Session` | 7 |
-| Handlers + `RegisterAuthenticatedRoutes` | thin Echo → CanX → model → commit → dispatch | 8 |
+| `Create/ReadAll/ReadOne/Update/Delete` | DB CRUD on a `*xorm.Session` (no events) | 7 |
+| Handlers + `RegisterAuthenticatedRoutes` | thin Echo → CanX → model → commit → JSON map | 8 |
 | `scripts/run-test-env.sh` | seed projects for assignment-validation AC | 9 |
 
 ---
@@ -715,62 +718,16 @@ git commit -m "feat(s2): add field-definition validation"
 
 ---
 
-### Task 5: Events
+### Task 5: Events — SKIPPED (deferred)
 
-Three event types dispatched on commit, as seams for S3. S2 registers no listeners.
-
-**Files:**
-- Modify: `main.go` (add after validation)
-
-**Interfaces:**
-- Consumes: `code.vikunja.io/api/pkg/events` (registered; `DispatchOnCommit` available).
-- Produces: `FieldDefinitionCreatedEvent`, `FieldDefinitionUpdatedEvent{Old,New}`, `FieldDefinitionDeletedEvent{DefinitionID}` — used by Task 7's CRUD methods.
-
-- [ ] **Step 1: Add the event types**
-
-```go
-// ── Events (seams for S3). Dispatched on commit via events.DispatchOnCommit so
-// listeners run after the transaction commits, matching TaskDeletedEvent. S2
-// registers no listeners.
-
-type FieldDefinitionCreatedEvent struct {
-	Definition *CustomFieldDefinition
-}
-
-func (FieldDefinitionCreatedEvent) Name() string { return "customfieldef.created" }
-
-type FieldDefinitionUpdatedEvent struct {
-	Old *CustomFieldDefinition
-	New *CustomFieldDefinition
-}
-
-func (FieldDefinitionUpdatedEvent) Name() string { return "customfieldef.updated" }
-
-type FieldDefinitionDeletedEvent struct {
-	DefinitionID int64
-}
-
-func (FieldDefinitionDeletedEvent) Name() string { return "customfieldef.deleted" }
-```
-
-- [ ] **Step 2: Add the events import**
-
-Add `"code.vikunja.io/api/pkg/events"` to the import block at `main.go:3-17`.
-
-- [ ] **Step 3: Restart and verify load**
-
-```bash
-./scripts/run-test-env.sh
-docker compose -f compose.test.yml logs 2>&1 | grep -iE "error|Loaded plugin custom-fields" | tail -5
-```
-Expected: plugin loads, no errors.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add main.go
-git commit -m "feat(s2): add field-definition lifecycle events"
-```
+**SKIPPED.** Task 1 spike 3 found plugin-defined event types are unmarshalable by
+host `json.Marshal` under yaegi (`json: unsupported type: func() string`), so they
+queue but never publish. The user chose to defer the seam rather than add
+host-defined event types to the fork. S2 registers no event types, imports
+`pkg/events` nowhere, and dispatches nothing. Tasks 7 and 8 contain no
+`events.*` calls. The reference event design and the verified two-call dispatch
+mechanism are retained in the spec's Events section for whatever S3 builds.
+No code, no commit for this task.
 
 ---
 
@@ -832,28 +789,32 @@ git commit -m "feat(s2): add whitelist permission gates for field definitions"
 
 ### Task 7: Model CRUD methods
 
-The DB layer. Each method takes `*xorm.Session` + `*user.User`, does the xorm work, and (for Create/Update/Delete) dispatches the Task 5 events on commit. The handler (Task 8) owns the session lifecycle (open, call method, commit, close). **Adopt the spike-2 shape** (methods below; free-functions if the spike so chose). These methods do NOT call `CanX` — the handler does.
+The DB layer. Each method takes `*xorm.Session` + `*user.User` and does the xorm work. **No events** (Task 5 skipped — events deferred). The handler (Task 8) owns the session lifecycle (open, call method, commit, close). **Adopt the spike-2 shape** (methods-on-struct; spike 2 confirmed this works). These methods do NOT call `CanX` — the handler does.
 
 **Files:**
 - Modify: `main.go` (add after permissions)
 
 **Interfaces:**
-- Consumes: structs (Task 2), errors (Task 3), `validateDefinition`/`validateAssignment` (Task 4), events (Task 5).
-- Produces (methods shown as spike-2 default):
+- Consumes: structs (Task 2), errors (Task 3), `validateDefinition`/`validateAssignment` (Task 4). **No events** (Task 5 skipped).
+- Produces (methods, per Task 1 spike-2 = methods-on-struct):
   `func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error)`
   `func (d *CustomFieldDefinition) ReadOne(s *xorm.Session) (*CustomFieldDefinition, []CustomFieldOption, []int64, error)`
   `func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error)`
-  `func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64, old *CustomFieldDefinition) (*CustomFieldDefinition, error)`
+  `func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error)`
   `func (d *CustomFieldDefinition) Delete(s *xorm.Session) error`
-  Each Create/Update/Delete method calls `events.DispatchOnCommit(s, evt)` before returning; the Task 8 handler calls `events.DispatchPending(ctx, s)` after `s.Commit()` and `events.CleanupPending(s)` on any error path.
-  (If spike-2 chose free-functions, make these package-level with `d`/`old` as leading params.)
+  **No `events.*` calls anywhere** — events are deferred. The handler (Task 8) owns the session: open → CanX → method → commit → close. No `old` param on Update (it existed only for the deferred event).
+
+**R6 (DRY helpers):** extract two shared helpers and use them in BOTH Create and Update (eliminates verbatim-duplicated options/assignment-insert blocks):
+`func setOptions(s *xorm.Session, defID int64, t string, options []CustomFieldOption) error` — delete existing options for defID (no-op on Create), then if `isSelectLike(t)` insert the options (set each `CustomFieldDefinitionID = defID`).
+`func setAssignment(s *xorm.Session, defID int64, projectIDs []int64) error` — delete existing assignment for defID (no-op on Create), then insert `resolveProjectIDs(projectIDs)` rows.
+Create calls them directly (delete-existing is a no-op when none exist); Update calls them after its own definition-row update. Keep `resolveProjectIDs` as written.
 
 - [ ] **Step 1: Add Create**
 
 ```go
 // ── Model CRUD. Handlers (Task 8) own the session: open, call CanX, call these,
-// commit, close. These methods never open/commit the session themselves. Events
-// are dispatched on commit by the handler after a successful method return.
+// commit, close. These methods never open/commit the session themselves. No events
+// (deferred — see spec Events section).
 
 // resolveProjectIDs enforces mutual exclusivity: empty ⟹ global sentinel [0];
 // non-empty ⟹ those IDs. The caller must not pass both a sentinel and specifics.
@@ -862,6 +823,42 @@ func resolveProjectIDs(projectIDs []int64) []int64 {
 		return []int64{0} // sentinel: all projects
 	}
 	return projectIDs
+}
+
+// setOptions replaces a definition's option rows. delete-existing is a no-op on
+// Create (none exist yet); on Update it clears the old set before re-inserting.
+// Options are only written for select/multiselect.
+func setOptions(s *xorm.Session, defID int64, t string, options []CustomFieldOption) error {
+	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldOption{}); err != nil {
+		return fmt.Errorf("custom-fields: clear options: %w", err)
+	}
+	if !isSelectLike(t) || len(options) == 0 {
+		return nil
+	}
+	for i := range options {
+		options[i].CustomFieldDefinitionID = defID
+	}
+	if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
+		return fmt.Errorf("custom-fields: insert options: %w", err)
+	}
+	return nil
+}
+
+// setAssignment replaces a definition's project assignment. delete-existing is a
+// no-op on Create; on Update it clears the old set before re-inserting.
+func setAssignment(s *xorm.Session, defID int64, projectIDs []int64) error {
+	if _, err := s.Table("custom_field_projects").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldProject{}); err != nil {
+		return fmt.Errorf("custom-fields: clear assignment: %w", err)
+	}
+	assign := resolveProjectIDs(projectIDs)
+	rows := make([]CustomFieldProject, len(assign))
+	for i, pid := range assign {
+		rows[i] = CustomFieldProject{CustomFieldDefinitionID: defID, ProjectID: pid}
+	}
+	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
+		return fmt.Errorf("custom-fields: insert assignment: %w", err)
+	}
+	return nil
 }
 
 func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
@@ -874,26 +871,12 @@ func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []
 	if _, err := s.Table("custom_field_definitions").Insert(d); err != nil {
 		return nil, fmt.Errorf("custom-fields: insert definition: %w", err)
 	}
-	if isSelectLike(d.Type) {
-		for i := range options {
-			options[i].CustomFieldDefinitionID = d.ID
-		}
-		if len(options) > 0 {
-			if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
-				return nil, fmt.Errorf("custom-fields: insert options: %w", err)
-			}
-		}
+	if err := setOptions(s, d.ID, d.Type, options); err != nil {
+		return nil, err
 	}
-	assign := resolveProjectIDs(projectIDs)
-	rows := make([]CustomFieldProject, len(assign))
-	for i, pid := range assign {
-		rows[i] = CustomFieldProject{CustomFieldDefinitionID: d.ID, ProjectID: pid}
+	if err := setAssignment(s, d.ID, projectIDs); err != nil {
+		return nil, err
 	}
-	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
-		return nil, fmt.Errorf("custom-fields: insert assignment: %w", err)
-	}
-	// Queue the created event; the handler dispatches it after Commit.
-	events.DispatchOnCommit(s, &FieldDefinitionCreatedEvent{Definition: d})
 	return d, nil
 }
 ```
@@ -953,10 +936,9 @@ func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error) 
 
 ```go
 // Update replaces the definition and its options + assignment wholesale (PUT
-// full-replace). It does NOT touch custom_field_values (S3's table). Queues
-// FieldDefinitionUpdatedEvent(old+new) via DispatchOnCommit; the handler dispatches
-// after Commit. `old` is the pre-mutation state the handler captured for the event.
-func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64, old *CustomFieldDefinition) (*CustomFieldDefinition, error) {
+// full-replace). It does NOT touch custom_field_values (S3's table). No event
+// (deferred). The handler captures no `old` state.
+func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
 	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
 	if err != nil {
 		return nil, fmt.Errorf("custom-fields: check old definition: %w", err)
@@ -978,32 +960,12 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 	if _, err := s.Table("custom_field_definitions").ID(d.ID).AllCols().UseBool().Update(d); err != nil {
 		return nil, fmt.Errorf("custom-fields: update definition: %w", err)
 	}
-	// Replace options wholesale.
-	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", d.ID).Delete(&CustomFieldOption{}); err != nil {
-		return nil, fmt.Errorf("custom-fields: clear options: %w", err)
+	if err := setOptions(s, d.ID, d.Type, options); err != nil {
+		return nil, err
 	}
-	if isSelectLike(d.Type) && len(options) > 0 {
-		for i := range options {
-			options[i].CustomFieldDefinitionID = d.ID
-		}
-		if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
-			return nil, fmt.Errorf("custom-fields: re-insert options: %w", err)
-		}
+	if err := setAssignment(s, d.ID, projectIDs); err != nil {
+		return nil, err
 	}
-	// Replace assignment wholesale.
-	if _, err := s.Table("custom_field_projects").Where("custom_field_definition_id = ?", d.ID).Delete(&CustomFieldProject{}); err != nil {
-		return nil, fmt.Errorf("custom-fields: clear assignment: %w", err)
-	}
-	assign := resolveProjectIDs(projectIDs)
-	rows := make([]CustomFieldProject, len(assign))
-	for i, pid := range assign {
-		rows[i] = CustomFieldProject{CustomFieldDefinitionID: d.ID, ProjectID: pid}
-	}
-	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
-		return nil, fmt.Errorf("custom-fields: re-insert assignment: %w", err)
-	}
-	// Queue the updated event with old + new state; handler dispatches after Commit.
-	events.DispatchOnCommit(s, &FieldDefinitionUpdatedEvent{Old: old, New: d})
 	return d, nil
 }
 ```
@@ -1012,8 +974,8 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 
 ```go
 // Delete hard-cascades the definition's OWN rows: definition + options +
-// assignment. It does NOT touch custom_field_values (S3's table). The handler
-// dispatches FieldDefinitionDeletedEvent{DefinitionID} on commit.
+// assignment. It does NOT touch custom_field_values (S3's table). No event
+// (deferred).
 func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
 	if err != nil {
@@ -1031,8 +993,6 @@ func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	if _, err := s.Table("custom_field_definitions").ID(d.ID).Delete(&CustomFieldDefinition{}); err != nil {
 		return fmt.Errorf("custom-fields: delete definition: %w", err)
 	}
-	// Queue the deleted event; the handler dispatches it after Commit.
-	events.DispatchOnCommit(s, &FieldDefinitionDeletedEvent{DefinitionID: d.ID})
 	return nil
 }
 ```
@@ -1061,29 +1021,88 @@ Thin Echo handlers: parse body → `CanX` (403 if false) → model method → co
 - Modify: `main.go:133-161` (routes + `managerHandler`) — replace with the new handlers + registration.
 
 **Interfaces:**
-- Consumes: model methods (Task 7), events (Task 5), errors (Task 3).
+- Consumes: model methods (Task 7), errors (Task 3). **No events** (Task 5 skipped).
 - Produces: five registered routes; `managerHandler` removed.
 
-- [ ] **Step 1: Add request/response helper types**
+- [ ] **Step 1: Add request type + response-map helpers**
 
 ```go
-// ── Handlers. Thin: parse → CanX (403) → model → commit → dispatch → JSON.
-// web.HTTPError is unavailable, so handlers use echo.NewHTTPError(code, msg).
+// ── Handlers. Thin: parse → CanX (403) → model → commit → JSON map. No events
+// (deferred). web.HTTPError is unavailable, so handlers use echo.NewHTTPError.
+//
+// R7 (spike 1 caveat): interpreted structs serialize as {} through c.JSON, so
+// responses are built as maps field-by-field, never by echoing a struct. xorm
+// DB read/write of interpreted structs works; only the c.JSON path is affected.
 
 type definitionRequest struct {
-	Name         string           `json:"name"`
-	Type         string           `json:"type"`
-	Description  string           `json:"description"`
-	FieldConfig  FieldConfig      `json:"field_config"`
-	DisplayOrder int              `json:"display_order"`
+	Name         string              `json:"name"`
+	Type         string              `json:"type"`
+	Description  string              `json:"description"`
+	FieldConfig  FieldConfig         `json:"field_config"`
+	DisplayOrder int                 `json:"display_order"`
 	Options      []CustomFieldOption `json:"options"`
-	ProjectIDs   []int64          `json:"project_ids"`
+	ProjectIDs   []int64             `json:"project_ids"`
 }
 
-type definitionResponse struct {
-	CustomFieldDefinition
-	Options     []CustomFieldOption `json:"options"`
-	ProjectIDs  []int64             `json:"project_ids"`
+// fieldConfigMap builds the field_config map with concrete float64 values
+// (dereferenced pointers) so c.JSON never has to marshal a yaegi-wrapped *float64.
+func fieldConfigMap(fc FieldConfig) map[string]interface{} {
+	m := map[string]interface{}{
+		"required":    fc.Required,
+		"default":     fc.Default,
+		"is_api_only": fc.IsAPIOnly,
+	}
+	if fc.Min != nil {
+		m["min"] = *fc.Min
+	}
+	if fc.Max != nil {
+		m["max"] = *fc.Max
+	}
+	return m
+}
+
+// definitionFieldsMap is the definition fields only (for list items, no relations).
+func definitionFieldsMap(d *CustomFieldDefinition) map[string]interface{} {
+	return map[string]interface{}{
+		"id":            d.ID,
+		"name":          d.Name,
+		"type":          d.Type,
+		"description":   d.Description,
+		"field_config":  fieldConfigMap(d.FieldConfig),
+		"display_order": d.DisplayOrder,
+	}
+}
+
+// definitionToMap is the full single-resource response: definition fields +
+// resolved options + project_ids ([] for global). Used by create/read/update.
+func definitionToMap(d *CustomFieldDefinition, opts []CustomFieldOption, pids []int64) map[string]interface{} {
+	m := definitionFieldsMap(d)
+	optMaps := make([]map[string]interface{}, 0, len(opts))
+	for _, o := range opts {
+		optMaps = append(optMaps, map[string]interface{}{
+			"id":            o.ID,
+			"custom_field_definition_id": o.CustomFieldDefinitionID,
+			"value":         o.Value,
+			"label":         o.Label,
+			"display_order": o.DisplayOrder,
+		})
+	}
+	m["options"] = optMaps
+	m["project_ids"] = pids
+	return m
+}
+
+// validateProjectIDList (R4) rejects a client-supplied project_id == 0 — the
+// reserved internal sentinel. Clients express "all projects" via [] (omitted),
+// never via [0]. This makes ErrCustomFieldGlobalConflict reachable and separates
+// the mutual-exclusivity guard from validateAssignment's existence check.
+func validateProjectIDList(ids []int64) error {
+	for _, pid := range ids {
+		if pid == 0 {
+			return ErrCustomFieldGlobalConflict{}
+		}
+	}
+	return nil
 }
 ```
 
@@ -1127,6 +1146,9 @@ func createHandler(c *echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
+	if err := validateProjectIDList(req.ProjectIDs); err != nil { // R4: reject sentinel
+		return toHTTPError(err)
+	}
 	d := &CustomFieldDefinition{
 		Name: req.Name, Type: req.Type, Description: req.Description,
 		FieldConfig: req.FieldConfig, DisplayOrder: req.DisplayOrder,
@@ -1135,29 +1157,25 @@ func createHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanCreate(s, u)
 	if err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
 	created, err := d.Create(s, u, req.Options, req.ProjectIDs)
 	if err != nil {
-		events.CleanupPending(s)
 		return toHTTPError(err)
 	}
-	// Create queued the event via DispatchOnCommit; commit, then dispatch it.
 	if err := s.Commit(); err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchPending(c.Request().Context(), s)
-	return c.JSON(http.StatusCreated, definitionResponse{
-		CustomFieldDefinition: *created,
-		Options:               req.Options,
-		ProjectIDs:           req.ProjectIDs,
-	})
+	// R5: re-read for a canonical response (real option IDs, resolved project_ids).
+	rd := &CustomFieldDefinition{ID: created.ID}
+	def, opts, pids, err := rd.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusCreated, definitionToMap(def, opts, pids))
 }
 ```
 
@@ -1187,7 +1205,7 @@ func readOneHandler(c *echo.Context) error {
 	if err != nil {
 		return toHTTPError(err)
 	}
-	return c.JSON(http.StatusOK, definitionResponse{CustomFieldDefinition: *def, Options: opts, ProjectIDs: pids})
+	return c.JSON(http.StatusOK, definitionToMap(def, opts, pids))
 }
 
 func listHandler(c *echo.Context) error {
@@ -1217,7 +1235,12 @@ func listHandler(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	return c.JSON(http.StatusOK, defs)
+	// R7: build a []map (interpreted structs would serialize as {}).
+	out := make([]map[string]interface{}, 0, len(defs))
+	for i := range defs {
+		out = append(out, definitionFieldsMap(&defs[i]))
+	}
+	return c.JSON(http.StatusOK, out)
 }
 ```
 
@@ -1237,6 +1260,9 @@ func updateHandler(c *echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
 	}
+	if err := validateProjectIDList(req.ProjectIDs); err != nil { // R4: reject sentinel
+		return toHTTPError(err)
+	}
 	d := &CustomFieldDefinition{
 		ID: id, Name: req.Name, Type: req.Type, Description: req.Description,
 		FieldConfig: req.FieldConfig, DisplayOrder: req.DisplayOrder,
@@ -1245,32 +1271,24 @@ func updateHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanUpdate(s, u)
 	if err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
-	// Capture old state for the event before mutation. Update will queue the
-	// FieldDefinitionUpdatedEvent{Old, New} via DispatchOnCommit.
-	var old CustomFieldDefinition
-	_ = s.Table("custom_field_definitions").ID(id).Get(&old) // best-effort; event is informational
-	updated, err := d.Update(s, u, req.Options, req.ProjectIDs, &old)
-	if err != nil {
-		events.CleanupPending(s)
+	if _, err := d.Update(s, u, req.Options, req.ProjectIDs); err != nil {
 		return toHTTPError(err)
 	}
 	if err := s.Commit(); err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchPending(c.Request().Context(), s)
-	return c.JSON(http.StatusOK, definitionResponse{
-		CustomFieldDefinition: *updated,
-		Options:               req.Options,
-		ProjectIDs:            req.ProjectIDs,
-	})
+	// R5: re-read for a canonical response (no old-state capture — events deferred).
+	rd := &CustomFieldDefinition{ID: id}
+	def, opts, pids, err := rd.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, definitionToMap(def, opts, pids))
 }
 
 func deleteHandler(c *echo.Context) error {
@@ -1287,30 +1305,24 @@ func deleteHandler(c *echo.Context) error {
 	defer s.Close()
 	ok, err := d.CanDelete(s, u)
 	if err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	if !ok {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
 	}
-	// Delete queues FieldDefinitionDeletedEvent{DefinitionID} via DispatchOnCommit.
 	if err := d.Delete(s); err != nil {
-		events.CleanupPending(s)
 		return toHTTPError(err)
 	}
 	if err := s.Commit(); err != nil {
-		events.CleanupPending(s)
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	events.DispatchPending(c.Request().Context(), s)
 	return c.NoContent(http.StatusNoContent)
 }
 ```
 
-- [ ] **Step 6: Add `strconv` import and replace route registration**
+- [ ] **Step 6: Add `db` + `strconv` imports and replace route registration**
 
-Add `"strconv"` to the import block. Replace `main.go:133-138` (the `RegisterAuthenticatedRoutes` method) with:
+Add `"code.vikunja.io/api/pkg/db"` and `"strconv"` to the import block (handlers use `db.NewSession()` and `strconv.ParseInt`). Do **NOT** add a `pkg/events` import — events are deferred. **R3:** the line anchors below (`main.go:133-138`, `:148-161`) are stale after Tasks 2–7 inserted code above — locate `RegisterAuthenticatedRoutes` and `managerHandler` by function name, not line number. Replace the `RegisterAuthenticatedRoutes` method with:
 
 ```go
 // RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
@@ -1500,7 +1512,7 @@ git commit -m "test(s2): seed project and verify field-definition acceptance cri
 - AC#7 (snake_case, envelope) → struct json tags + Task 9 Step 9. ✓
 - Data model (3 tables) → Task 2. ✓
 - Migration (modify-existing) → Task 2 Step 2. ✓
-- Events (3, on-commit) → Task 5 + dispatched in Task 8 handlers. ✓
+- Events → Task 5 SKIPPED (deferred per spike 3; spec amended). No events in S2. ✓
 - S3 seams (guard insertion points) → CanUpdate/CanDelete in Task 6 (where S3 adds a block-if-values check). ✓
 - Spikes (2, fallback ladder) → Task 1. ✓
 - Remove managerHandler → Task 8 Step 7. ✓
@@ -1508,7 +1520,7 @@ git commit -m "test(s2): seed project and verify field-definition acceptance cri
 
 **Placeholder scan:** No TBD/TODO in plan body. One explicit note in Task 7 Step 3 ("pick one and keep it consistent") — that is a real engineering choice with both options shown, not a gap. Task 9 Step 1 has a genuine contingency note about `projects` column names (version-dependent) with a concrete fallback command — not a placeholder.
 
-**Type consistency:** `CustomFieldDefinition`/`CustomFieldOption`/`CustomFieldProject`/`FieldConfig` defined in Task 2, used identically in Tasks 4/7/8. Error types defined Task 3, switched-on in Task 8 `toHTTPError`. Event types defined Task 5, dispatched in Task 8. `definitionRequest`/`definitionResponse` defined Task 8, used in handlers. `IsManager` from `main.go:80` (existing) consumed in Task 6. Method signatures match between Task 7 (defines) and Task 8 (calls). ✓
+**Type consistency:** `CustomFieldDefinition`/`CustomFieldOption`/`CustomFieldProject`/`FieldConfig` defined in Task 2, used identically in Tasks 4/7/8. Error types defined Task 3, switched-on in Task 8 `toHTTPError`. Events deferred (Task 5 skipped — no event types). `definitionRequest` + response-map helpers (`definitionToMap`/`definitionFieldsMap`/`fieldConfigMap`/`validateProjectIDList`) defined Task 8, used in handlers. `setOptions`/`setAssignment`/`resolveProjectIDs` defined Task 7 (R6). `IsManager` from `main.go:80` (existing) consumed in Task 6. Method signatures match between Task 7 (defines) and Task 8 (calls). ✓
 
 No gaps found. Plan is complete.
 

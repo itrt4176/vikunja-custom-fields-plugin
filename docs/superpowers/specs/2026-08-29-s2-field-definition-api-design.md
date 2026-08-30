@@ -125,8 +125,11 @@ reference counts anywhere.
 **Decision:** S2's delete **hard-cascades the definition's own rows** (definition
 + options + assignment M2M) in one transaction — the team-style manual cascade of
 owned rows. It does **not** touch the `custom_field_values` table — that's S3's
-table and S3's lifecycle decision. S2 dispatches `FieldDefinitionDeletedEvent` on
-commit as S3's seam to wire value cleanup later. The production data-loss concern
+table and S3's lifecycle decision. **The event seam is deferred** (see Events):
+S2 dispatches no `FieldDefinitionDeletedEvent` — plugin-defined event types are
+unmarshalable by the host under yaegi (spike 3), and the user chose to defer rather
+than add host-defined event types to the fork. S3 will wire its own value-cleanup
+trigger when it builds the values lifecycle. The production data-loss concern
 (soft-delete was originally considered for this) is protected *by not deleting
 values in S2*, not by soft-deleting the definition — soft-deleting the definition
 alone is incoherent unless values are also soft-deleted, which is S3's call. The
@@ -137,9 +140,10 @@ constraints, options) without checking the values table — consistent with "S2
 doesn't own/manage values," and with how Vikunja lets you freely edit a saved
 filter's criteria even though tasks that used to match no longer do. Existing
 values that no longer match become S3's read-path concern. S2 is designed for
-future tightening: it dispatches `FieldDefinitionUpdatedEvent` (old+new state) and
-leaves `CanUpdate`/`CanDelete` as clean guard-insertion points so S3 can later add
-a "block-if-values-exist" check without a rewrite.
+future tightening: it leaves `CanUpdate`/`CanDelete` as clean guard-insertion
+points so S3 can later add a "block-if-values-exist" check without a rewrite.
+(The originally-planned `FieldDefinitionUpdatedEvent` dispatch is deferred — see
+Events.)
 
 ### JSON-column precedent (settled `field_config` storage)
 
@@ -238,7 +242,7 @@ main.go
 │                              + CustomFieldOption, CustomFieldProject structs
 ├── Permissions:       CustomFieldDefinition.{CanCreate,CanRead,CanUpdate,CanDelete}(*xorm.Session, *user.User) (bool,error) → wrap IsManager
 ├── Validation:        type/constraint/option/assignment checks (pure funcs)
-├── Events:            FieldDefinition{Created,Updated,Deleted}Event + DispatchOnCommit
+├── Events:            DEFERRED — plugin-defined events unmarshalable under yaegi (spike 3; see Events)
 ├── Handlers:          thin Echo handlers → CanX → model method → commit → dispatch
 └── Errors:            custom error structs + ErrCode consts + HTTPError via echo.NewHTTPError
 ```
@@ -413,14 +417,24 @@ instead — same HTTP outcome, recorded as an upstream-conversion point (swap to
 **9000s range** (no plugin error-code convention exists upstream; recorded so it
 doesn't collide).
 
-### The S3 seams (built now, per "maximally accommodating future S3 decisions")
+### The S3 seams (per "maximally accommodating future S3 decisions")
 
-- **Events dispatched on commit:** `FieldDefinitionCreatedEvent`,
-  `FieldDefinitionUpdatedEvent` (old+new state), `FieldDefinitionDeletedEvent`.
-  Queue via `events.DispatchOnCommit(s, evt)` in the model method (before return);
-  dispatch via `events.DispatchPending(ctx, s)` in the handler after `s.Commit()`;
-  cancel via `events.CleanupPending(s)` on any error/rollback path. (events is in
-  the symbol table.) S3 wires listeners; S2 registers none.
+- **Events: DEFERRED.** The originally-planned on-commit events
+  (`FieldDefinitionCreated/Updated/DeletedEvent`) are **not** built in S2. Spike 3
+  found plugin-defined event types bridge to the host `events.Event` interface but
+  are then **unmarshalable** by the host's `json.Marshal(event)` under yaegi
+  (`json: unsupported type: func() string` — the yaegi wrapper exposes the
+  interpreted `Name() string` method as a `func() string` bridge field), so the
+  event is queued but never published and listeners receive nothing (HTTP 200
+  masks the failure). A host-defined event type works end-to-end (spike 3b proved
+  `models.TaskUpdatedEvent`), but no host custom-field event type exists, so that
+  path needs a fork core change + image rebuild. The user chose to **defer the
+  seam** rather than add core event types, keeping S2 a zero-core-change proving
+  ground. S3 will provide its own value-cleanup trigger when it builds the values
+  lifecycle (and may revisit the yaegi limit then with concrete needs in view).
+  The C2 dispatch-mechanism characterization (`DispatchOnCommit` queues /
+  `DispatchPending` dispatches / `CleanupPending` on rollback) is retained as
+  reference for whatever S3 builds. S2 registers no listeners and dispatches nothing.
 - **Guard insertion points:** `CanUpdate` and `CanDelete` are where a future
   "block if values exist" check slots in — the model method is the natural place,
   so S3 adds it without touching handlers. A one-line comment marks the point.
@@ -478,6 +492,31 @@ project_views precedent). No new migration, no new ID.
 
 ## Events
 
+**DEFERRED — not built in S2.** Spike 3 (Task 1) found that plugin-defined event
+types cannot be published under yaegi: the interpreted struct bridges to the host
+`events.Event` interface (`DispatchOnCommit` accepts it, host code calls `Name()`),
+but `DispatchPending` → `DispatchWithContext` → `json.Marshal(event)` at host
+`pkg/events/events.go:220` fails with `json: unsupported type: func() string`
+because the yaegi wrapper exposes the interpreted `Name() string` method as a
+`func() string` bridge field that `encoding/json` refuses to serialize. The error
+is swallowed into `DispatchPending`'s log (events.go:273-274), so the HTTP handler
+still returns 200, but the event is never published and listeners receive nothing.
+
+A bounded probe (spike 3b) confirmed **host-defined** event types populated by
+plugin code work end-to-end (`models.TaskUpdatedEvent` marshaled, published,
+reached listeners). But no host custom-field event type exists in `pkg/models`
+today, so using one requires a fork core change + image rebuild.
+
+**Decision (user, 2026-08-29): defer the seam.** S2 registers no event types,
+dispatches nothing, and imports `pkg/events` nowhere. S2 keeps all 7 acceptance
+criteria (none reference events). S3 will provide its own value-cleanup trigger
+when it builds the values lifecycle, and may revisit the yaegi marshal limit then
+with concrete needs in view. The originally-designed event types and the verified
+two-call dispatch mechanism are recorded below as reference for whatever S3 builds
+(or for upstreaming, where the types become native host types and `json.Marshal`
+works):
+
+Reference design (not implemented in S2):
 ```go
 type FieldDefinitionCreatedEvent struct{ Definition *CustomFieldDefinition }
 func (FieldDefinitionCreatedEvent) Name() string { return "customfieldef.created" }
@@ -497,18 +536,28 @@ func (FieldDefinitionDeletedEvent) Name() string { return "customfieldef.deleted
   listener) can diff what changed without a separate read.
 - `Deleted` carries the ID (not the struct — the row's gone) so S3's listener can
   cascade values by `definition_id`.
-- **Dispatch mechanism (corrected — see the verified-facts section):**
-  `events.DispatchOnCommit(key, event)` only *queues* the event in a `pendingEvents`
-  map keyed by the session; it does **not** dispatch. The real upstream pattern is a
-  two-call split (verified at `pkg/models/tasks.go:2072` + `pkg/routes/api/v2/admin_projects.go:116`):
+- **Dispatch mechanism (reference, verified):** `events.DispatchOnCommit(key,
+  event)` only *queues* the event in a `pendingEvents` map keyed by the session; it
+  does **not** dispatch. The real upstream pattern is a two-call split (verified at
+  `pkg/models/tasks.go:2072` + `pkg/routes/api/v2/admin_projects.go:116`):
   1. The **model method** calls `events.DispatchOnCommit(s, event)` *before*
      returning (while the session is still open).
   2. The **handler** calls `s.Commit()`; on success it calls
      `events.DispatchPending(c.Request().Context(), s)` to actually publish the
      queued events. On any error/rollback path it calls `events.CleanupPending(s)`
      to drop the queued events (otherwise the `pendingEvents` map entry leaks).
-  This mirrors `TaskDeletedEvent`/`ProjectDeletedEvent`. S2 registers no listeners;
-  it only queues + dispatches.
+  This mirrors `TaskDeletedEvent`/`ProjectDeletedEvent`.
+
+### Response serialization (spike 1 caveat — applies to all handlers)
+
+Spike 1 also found that interpreted structs serialize as `{}` through `c.JSON` /
+`encoding/json` (yaegi wrapper fields are not json-visible the way compiled-Go
+struct fields are — same root-cause class as the event-marshal failure). Handlers
+therefore **build response maps field-by-field** (id/name/type/description/
+field_config/display_order/options/project_ids), never echo an interpreted model
+struct directly. `xorm` DB read/write of interpreted structs works fine (spike 1
+round-tripped `FieldConfig` through the DB); only the HTTP `c.JSON` path is
+affected.
 
 ## Testing strategy
 
@@ -547,6 +596,15 @@ the vikunja module). Testing is **integration via the existing test instance**
 
 Both spikes run against the test instance and are discarded once the mechanism is
 chosen — de-risking the two new reflect paths before the real S2 code.
+
+**Spike 3 (added in the plan, run during Task 1): plugin event type → host
+`events.Event` interface.** Outcome: the interpreted struct bridges to the
+interface but is unmarshalable by host `json.Marshal` (`json: unsupported type:
+func() string`), so it is never published. A host-defined event works (spike 3b),
+but needs a fork change. → events seam **deferred** (see Events). Spike 1 also
+found interpreted structs serialize as `{}` via `c.JSON` → handlers build response
+maps (see Response serialization). Full findings in
+`docs/superpowers/plans/2026-08-29-s2-spike-result.md`.
 
 ### Acceptance-criteria verification (via the test instance + curl + JWTs S8 produces)
 
