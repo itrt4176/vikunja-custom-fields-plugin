@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"code.vikunja.io/api/pkg/db"
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/models"
 	"code.vikunja.io/api/pkg/plugins"
@@ -441,6 +443,284 @@ func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	return nil
 }
 
+// ── Handlers. Thin: parse → CanX (403) → model → commit → JSON map. No events
+// (deferred). web.HTTPError is unavailable, so handlers use echo.NewHTTPError.
+//
+// R7 (spike 1 caveat): interpreted structs serialize as {} through c.JSON, so
+// responses are built as maps field-by-field, never by echoing a struct. xorm
+// DB read/write of interpreted structs works; only the c.JSON path is affected.
+
+type definitionRequest struct {
+	Name         string              `json:"name"`
+	Type         string              `json:"type"`
+	Description  string              `json:"description"`
+	FieldConfig  FieldConfig         `json:"field_config"`
+	DisplayOrder int                 `json:"display_order"`
+	Options      []CustomFieldOption `json:"options"`
+	ProjectIDs   []int64             `json:"project_ids"`
+}
+
+// fieldConfigMap builds the field_config map with concrete float64 values
+// (dereferenced pointers) so c.JSON never has to marshal a yaegi-wrapped *float64.
+func fieldConfigMap(fc FieldConfig) map[string]interface{} {
+	m := map[string]interface{}{
+		"required":    fc.Required,
+		"default":     fc.Default,
+		"is_api_only": fc.IsAPIOnly,
+	}
+	if fc.Min != nil {
+		m["min"] = *fc.Min
+	}
+	if fc.Max != nil {
+		m["max"] = *fc.Max
+	}
+	return m
+}
+
+// definitionFieldsMap is the definition fields only (for list items, no relations).
+func definitionFieldsMap(d *CustomFieldDefinition) map[string]interface{} {
+	return map[string]interface{}{
+		"id":            d.ID,
+		"name":          d.Name,
+		"type":          d.Type,
+		"description":   d.Description,
+		"field_config":  fieldConfigMap(d.FieldConfig),
+		"display_order": d.DisplayOrder,
+	}
+}
+
+// definitionToMap is the full single-resource response: definition fields +
+// resolved options + project_ids ([] for global). Used by create/read/update.
+func definitionToMap(d *CustomFieldDefinition, opts []CustomFieldOption, pids []int64) map[string]interface{} {
+	m := definitionFieldsMap(d)
+	optMaps := make([]map[string]interface{}, 0, len(opts))
+	for _, o := range opts {
+		optMaps = append(optMaps, map[string]interface{}{
+			"id":            o.ID,
+			"custom_field_definition_id": o.CustomFieldDefinitionID,
+			"value":         o.Value,
+			"label":         o.Label,
+			"display_order": o.DisplayOrder,
+		})
+	}
+	m["options"] = optMaps
+	m["project_ids"] = pids
+	return m
+}
+
+// validateProjectIDList (R4) rejects a client-supplied project_id == 0 — the
+// reserved internal sentinel. Clients express "all projects" via [] (omitted),
+// never via [0]. This makes ErrCustomFieldGlobalConflict reachable and separates
+// the mutual-exclusivity guard from validateAssignment's existence check.
+func validateProjectIDList(ids []int64) error {
+	for _, pid := range ids {
+		if pid == 0 {
+			return ErrCustomFieldGlobalConflict{}
+		}
+	}
+	return nil
+}
+
+// toHTTPError translates plugin-local errors to echo HTTP errors. web.HTTPError
+// is unavailable to yaegi, so this uses echo.NewHTTPError(code, message).
+func toHTTPError(err error) error {
+	switch err.(type) {
+	case ErrCustomFieldNameEmpty:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldInvalidType:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldOptionsForNonSelect:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldDuplicateOption:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldConstraintForType:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldInvalidConstraint:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldProjectNotFound:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldGlobalConflict:
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case ErrCustomFieldNotFound:
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+}
+
+func createHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	var req definitionRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if err := validateProjectIDList(req.ProjectIDs); err != nil { // R4: reject sentinel
+		return toHTTPError(err)
+	}
+	d := &CustomFieldDefinition{
+		Name: req.Name, Type: req.Type, Description: req.Description,
+		FieldConfig: req.FieldConfig, DisplayOrder: req.DisplayOrder,
+	}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanCreate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	created, err := d.Create(s, u, req.Options, req.ProjectIDs)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// R5: re-read for a canonical response (real option IDs, resolved project_ids).
+	rd := &CustomFieldDefinition{ID: created.ID}
+	def, opts, pids, err := rd.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusCreated, definitionToMap(def, opts, pids))
+}
+
+func readOneHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	d := &CustomFieldDefinition{ID: id}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanRead(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	def, opts, pids, err := d.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, definitionToMap(def, opts, pids))
+}
+
+func listHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	d := &CustomFieldDefinition{}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanRead(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	pidStr := c.QueryParam("project_id")
+	pid := int64(0)
+	if pidStr != "" {
+		pid, err = strconv.ParseInt(pidStr, 10, 64)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "invalid project_id")
+		}
+	}
+	defs, err := ReadAll(s, pid)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// R7: build a []map (interpreted structs would serialize as {}).
+	out := make([]map[string]interface{}, 0, len(defs))
+	for i := range defs {
+		out = append(out, definitionFieldsMap(&defs[i]))
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+func updateHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	var req definitionRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if err := validateProjectIDList(req.ProjectIDs); err != nil { // R4: reject sentinel
+		return toHTTPError(err)
+	}
+	d := &CustomFieldDefinition{
+		ID: id, Name: req.Name, Type: req.Type, Description: req.Description,
+		FieldConfig: req.FieldConfig, DisplayOrder: req.DisplayOrder,
+	}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanUpdate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	if _, err := d.Update(s, u, req.Options, req.ProjectIDs); err != nil {
+		return toHTTPError(err)
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// R5: re-read for a canonical response (no old-state capture — events deferred).
+	rd := &CustomFieldDefinition{ID: id}
+	def, opts, pids, err := rd.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, definitionToMap(def, opts, pids))
+}
+
+func deleteHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	d := &CustomFieldDefinition{ID: id}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanDelete(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	if err := d.Delete(s); err != nil {
+		return toHTTPError(err)
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 // CustomFieldsPlugin is the main plugin struct. All capabilities (tables, routes)
 // are methods added to this struct in later tasks.
 type CustomFieldsPlugin struct{}
@@ -497,10 +777,15 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 }
 
 // RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
-// /api/v1/plugins/ group.
+// /api/v1/plugins/ group. The temporary S8 manager route is removed; IsManager
+// is now exercised on the real field-definition endpoints.
 func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
-	g.GET("/custom-fields/health", healthHandler)   // S1 throwaway load-proof
-	g.GET("/custom-fields/manager", managerHandler) // S8 temporary, remove after S2
+	g.GET("/custom-fields/health", healthHandler) // S1 throwaway load-proof
+	g.POST("/custom-fields/definitions", createHandler)
+	g.GET("/custom-fields/definitions", listHandler)
+	g.GET("/custom-fields/definitions/:id", readOneHandler)
+	g.PUT("/custom-fields/definitions/:id", updateHandler)
+	g.DELETE("/custom-fields/definitions/:id", deleteHandler)
 }
 
 func healthHandler(c *echo.Context) error {
@@ -508,21 +793,6 @@ func healthHandler(c *echo.Context) error {
 		"name":    "custom-fields",
 		"version": "0.1.0",
 		"status":  "ok",
-	})
-}
-
-// managerHandler is a temporary S8 verification route: it proves the whitelist
-// predicate resolves correctly for the authenticated caller. It is not a
-// management surface — S2/S9 enforce IsManager on the real endpoints. Remove
-// this route once S2 is in place and the predicate is exercised there.
-func managerHandler(c *echo.Context) error {
-	u, err := user.GetCurrentUser(c)
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-	}
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"username":   u.Username,
-		"is_manager": IsManager(u.Username),
 	})
 }
 
