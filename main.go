@@ -81,6 +81,67 @@ type CustomFieldProject struct {
 
 func (CustomFieldProject) TableName() string { return "custom_field_projects" }
 
+// ── Errors (plugin-local 9000s range; web.HTTPError is unavailable to yaegi,
+// so handlers translate these to echo.NewHTTPError(code, message). Upstream
+// conversion: replace echo.NewHTTPError with HTTPError()/ErrCode per custom-errors.md.)
+
+const (
+	ErrCodeCustomFieldNameEmpty            = 9001
+	ErrCodeCustomFieldInvalidType          = 9002
+	ErrCodeCustomFieldOptionsForNonSelect  = 9003
+	ErrCodeCustomFieldDuplicateOption      = 9004
+	ErrCodeCustomFieldConstraintForType    = 9005
+	ErrCodeCustomFieldInvalidConstraint    = 9006
+	ErrCodeCustomFieldProjectNotFound      = 9007
+	ErrCodeCustomFieldNotFound             = 9008
+	ErrCodeCustomFieldGlobalConflict       = 9009
+)
+
+type ErrCustomFieldNameEmpty struct{}
+func (ErrCustomFieldNameEmpty) Error() string { return "custom field name must not be empty" }
+
+type ErrCustomFieldInvalidType struct{ Type string }
+func (e ErrCustomFieldInvalidType) Error() string {
+	return fmt.Sprintf("invalid custom field type: %s", e.Type)
+}
+
+type ErrCustomFieldOptionsForNonSelect struct{ Type string }
+func (e ErrCustomFieldOptionsForNonSelect) Error() string {
+	return fmt.Sprintf("options are only allowed for select/multiselect, not %s", e.Type)
+}
+
+type ErrCustomFieldDuplicateOption struct{ Value string }
+func (e ErrCustomFieldDuplicateOption) Error() string {
+	return fmt.Sprintf("duplicate option value: %s", e.Value)
+}
+
+type ErrCustomFieldConstraintForType struct{ Type, Constraint string }
+func (e ErrCustomFieldConstraintForType) Error() string {
+	return fmt.Sprintf("constraint %s is not valid for type %s", e.Constraint, e.Type)
+}
+
+type ErrCustomFieldInvalidConstraint struct{ Detail string }
+func (e ErrCustomFieldInvalidConstraint) Error() string {
+	return fmt.Sprintf("invalid constraint: %s", e.Detail)
+}
+
+type ErrCustomFieldProjectNotFound struct{ ID int64 }
+func (e ErrCustomFieldProjectNotFound) Error() string {
+	return fmt.Sprintf("project %d does not exist", e.ID)
+}
+
+type ErrCustomFieldNotFound struct{ ID int64 }
+func (e ErrCustomFieldNotFound) Error() string {
+	return fmt.Sprintf("custom field definition %d not found", e.ID)
+}
+
+// ErrCustomFieldGlobalConflict: assignment mixes the global sentinel (project_id=0)
+// with specific projects, or carries the sentinel alongside specific rows.
+type ErrCustomFieldGlobalConflict struct{}
+func (ErrCustomFieldGlobalConflict) Error() string {
+	return "a field is either global (all projects) or assigned to specific projects, not both"
+}
+
 // whitelist holds the lowercase usernames permitted to manage custom fields.
 // Populated once in Init() from Vikunja's config (customfields.whitelist,
 // overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST env var); read-only
