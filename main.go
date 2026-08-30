@@ -89,51 +89,59 @@ func (CustomFieldProject) TableName() string { return "custom_field_projects" }
 // conversion: replace echo.NewHTTPError with HTTPError()/ErrCode per custom-errors.md.)
 
 const (
-	ErrCodeCustomFieldNameEmpty            = 9001
-	ErrCodeCustomFieldInvalidType          = 9002
-	ErrCodeCustomFieldOptionsForNonSelect  = 9003
-	ErrCodeCustomFieldDuplicateOption      = 9004
-	ErrCodeCustomFieldConstraintForType    = 9005
-	ErrCodeCustomFieldInvalidConstraint    = 9006
-	ErrCodeCustomFieldProjectNotFound      = 9007
-	ErrCodeCustomFieldNotFound             = 9008
-	ErrCodeCustomFieldGlobalConflict       = 9009
+	ErrCodeCustomFieldNameEmpty           = 9001
+	ErrCodeCustomFieldInvalidType         = 9002
+	ErrCodeCustomFieldOptionsForNonSelect = 9003
+	ErrCodeCustomFieldDuplicateOption     = 9004
+	ErrCodeCustomFieldConstraintForType   = 9005
+	ErrCodeCustomFieldInvalidConstraint   = 9006
+	ErrCodeCustomFieldProjectNotFound     = 9007
+	ErrCodeCustomFieldNotFound            = 9008
+	ErrCodeCustomFieldGlobalConflict      = 9009
 )
 
 type ErrCustomFieldNameEmpty struct{}
+
 func (ErrCustomFieldNameEmpty) Error() string { return "custom field name must not be empty" }
 
 type ErrCustomFieldInvalidType struct{ Type string }
+
 func (e ErrCustomFieldInvalidType) Error() string {
 	return fmt.Sprintf("invalid custom field type: %s", e.Type)
 }
 
 type ErrCustomFieldOptionsForNonSelect struct{ Type string }
+
 func (e ErrCustomFieldOptionsForNonSelect) Error() string {
 	return fmt.Sprintf("options are only allowed for select/multiselect, not %s", e.Type)
 }
 
 type ErrCustomFieldDuplicateOption struct{ Value string }
+
 func (e ErrCustomFieldDuplicateOption) Error() string {
 	return fmt.Sprintf("duplicate option value: %s", e.Value)
 }
 
 type ErrCustomFieldConstraintForType struct{ Type, Constraint string }
+
 func (e ErrCustomFieldConstraintForType) Error() string {
 	return fmt.Sprintf("constraint %s is not valid for type %s", e.Constraint, e.Type)
 }
 
 type ErrCustomFieldInvalidConstraint struct{ Detail string }
+
 func (e ErrCustomFieldInvalidConstraint) Error() string {
 	return fmt.Sprintf("invalid constraint: %s", e.Detail)
 }
 
 type ErrCustomFieldProjectNotFound struct{ ID int64 }
+
 func (e ErrCustomFieldProjectNotFound) Error() string {
 	return fmt.Sprintf("project %d does not exist", e.ID)
 }
 
 type ErrCustomFieldNotFound struct{ ID int64 }
+
 func (e ErrCustomFieldNotFound) Error() string {
 	return fmt.Sprintf("custom field definition %d not found", e.ID)
 }
@@ -141,6 +149,7 @@ func (e ErrCustomFieldNotFound) Error() string {
 // ErrCustomFieldGlobalConflict: assignment mixes the global sentinel (project_id=0)
 // with specific projects, or carries the sentinel alongside specific rows.
 type ErrCustomFieldGlobalConflict struct{}
+
 func (ErrCustomFieldGlobalConflict) Error() string {
 	return "a field is either global (all projects) or assigned to specific projects, not both"
 }
@@ -295,6 +304,7 @@ func setOptions(s *xorm.Session, defID int64, t string, options []CustomFieldOpt
 		return nil
 	}
 	for i := range options {
+		options[i].ID = 0 // don't let a client-supplied id reach Insert
 		options[i].CustomFieldDefinitionID = defID
 	}
 	if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
@@ -392,7 +402,7 @@ func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error) 
 func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
 	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
 	if err != nil {
-		return nil, fmt.Errorf("custom-fields: check old definition: %w", err)
+		return nil, fmt.Errorf("custom-fields: check definition: %w", err)
 	}
 	if !has {
 		return nil, ErrCustomFieldNotFound{ID: d.ID}
@@ -406,7 +416,6 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 	// AllCols writes every column including zero values (xorm's Update skips
 	// zero-valued cols by default, which would break PUT full-replace for
 	// cleared fields, display_order=0, field_config.required=false, etc.).
-	// UseBool ensures the bools inside FieldConfig are not skipped either.
 	// (Mirrors upstream label.go's explicit .Cols(...) approach.)
 	if _, err := s.Table("custom_field_definitions").ID(d.ID).AllCols().UseBool().Update(d); err != nil {
 		return nil, fmt.Errorf("custom-fields: update definition: %w", err)
@@ -496,11 +505,11 @@ func definitionToMap(d *CustomFieldDefinition, opts []CustomFieldOption, pids []
 	optMaps := make([]map[string]interface{}, 0, len(opts))
 	for _, o := range opts {
 		optMaps = append(optMaps, map[string]interface{}{
-			"id":            o.ID,
+			"id":                         o.ID,
 			"custom_field_definition_id": o.CustomFieldDefinitionID,
-			"value":         o.Value,
-			"label":         o.Label,
-			"display_order": o.DisplayOrder,
+			"value":                      o.Value,
+			"label":                      o.Label,
+			"display_order":              o.DisplayOrder,
 		})
 	}
 	m["options"] = optMaps
