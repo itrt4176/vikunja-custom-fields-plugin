@@ -1,7 +1,7 @@
 ---
 title: "Plugin Foundation"
 description: "Plugin loads on startup, registers routes, and creates database tables for custom fields."
-status: pending
+status: done
 priority: 90
 labels: ["backend", "infrastructure"]
 position: 1

@@ -1,7 +1,7 @@
 ---
 title: "Config Whitelist"
 description: "The customfields.whitelist config key defines which users are permitted to manage custom fields."
-status: pending
+status: done
 priority: 70
 labels: ["backend", "configuration"]
 position: 8
