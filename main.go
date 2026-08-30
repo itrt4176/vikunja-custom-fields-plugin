@@ -204,6 +204,27 @@ func validateAssignment(s *xorm.Session, projectIDs []int64) error {
 	return nil
 }
 
+// ── Permissions. All field-definition management is whitelist-gated. These
+// mirror Vikunja's Permissions interface (CanCreate/CanRead/CanUpdate/CanDelete);
+// the only deviation is *user.User instead of web.Auth (web is unavailable to
+// yaegi) — an upstream-conversion point.
+
+func (d *CustomFieldDefinition) CanCreate(s *xorm.Session, u *user.User) (bool, error) {
+	return IsManager(u.Username), nil
+}
+
+func (d *CustomFieldDefinition) CanRead(s *xorm.Session, u *user.User) (bool, error) {
+	return IsManager(u.Username), nil
+}
+
+func (d *CustomFieldDefinition) CanUpdate(s *xorm.Session, u *user.User) (bool, error) {
+	return IsManager(u.Username), nil
+}
+
+func (d *CustomFieldDefinition) CanDelete(s *xorm.Session, u *user.User) (bool, error) {
+	return IsManager(u.Username), nil
+}
+
 // whitelist holds the lowercase usernames permitted to manage custom fields.
 // Populated once in Init() from Vikunja's config (customfields.whitelist,
 // overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST env var); read-only
