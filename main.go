@@ -269,6 +269,178 @@ func IsManager(username string) bool {
 	return ok
 }
 
+// ── Model CRUD. Handlers (Task 8) own the session: open, call CanX, call these,
+// commit, close. These methods never open/commit the session themselves. No events
+// (deferred — see spec Events section).
+
+// resolveProjectIDs enforces mutual exclusivity: empty ⟹ global sentinel [0];
+// non-empty ⟹ those IDs. The caller must not pass both a sentinel and specifics.
+func resolveProjectIDs(projectIDs []int64) []int64 {
+	if len(projectIDs) == 0 {
+		return []int64{0} // sentinel: all projects
+	}
+	return projectIDs
+}
+
+// setOptions replaces a definition's option rows. delete-existing is a no-op on
+// Create (none exist yet); on Update it clears the old set before re-inserting.
+// Options are only written for select/multiselect.
+func setOptions(s *xorm.Session, defID int64, t string, options []CustomFieldOption) error {
+	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldOption{}); err != nil {
+		return fmt.Errorf("custom-fields: clear options: %w", err)
+	}
+	if !isSelectLike(t) || len(options) == 0 {
+		return nil
+	}
+	for i := range options {
+		options[i].CustomFieldDefinitionID = defID
+	}
+	if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
+		return fmt.Errorf("custom-fields: insert options: %w", err)
+	}
+	return nil
+}
+
+// setAssignment replaces a definition's project assignment. delete-existing is a
+// no-op on Create; on Update it clears the old set before re-inserting.
+func setAssignment(s *xorm.Session, defID int64, projectIDs []int64) error {
+	if _, err := s.Table("custom_field_projects").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldProject{}); err != nil {
+		return fmt.Errorf("custom-fields: clear assignment: %w", err)
+	}
+	assign := resolveProjectIDs(projectIDs)
+	rows := make([]CustomFieldProject, len(assign))
+	for i, pid := range assign {
+		rows[i] = CustomFieldProject{CustomFieldDefinitionID: defID, ProjectID: pid}
+	}
+	if _, err := s.Table("custom_field_projects").Insert(&rows); err != nil {
+		return fmt.Errorf("custom-fields: insert assignment: %w", err)
+	}
+	return nil
+}
+
+func (d *CustomFieldDefinition) Create(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
+	if err := validateDefinition(d, options); err != nil {
+		return nil, err
+	}
+	if err := validateAssignment(s, projectIDs); err != nil {
+		return nil, err
+	}
+	if _, err := s.Table("custom_field_definitions").Insert(d); err != nil {
+		return nil, fmt.Errorf("custom-fields: insert definition: %w", err)
+	}
+	if err := setOptions(s, d.ID, d.Type, options); err != nil {
+		return nil, err
+	}
+	if err := setAssignment(s, d.ID, projectIDs); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// ReadOne fetches a definition with its options and project assignment. Returns
+// the definition, its options (empty for non-select), and its project_ids (empty
+// slice if global — callers treat empty as "all projects").
+func (d *CustomFieldDefinition) ReadOne(s *xorm.Session) (*CustomFieldDefinition, []CustomFieldOption, []int64, error) {
+	has, err := s.Table("custom_field_definitions").ID(d.ID).Get(d)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("custom-fields: get definition: %w", err)
+	}
+	if !has {
+		return nil, nil, nil, ErrCustomFieldNotFound{ID: d.ID}
+	}
+	var opts []CustomFieldOption
+	if err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", d.ID).OrderBy("display_order asc").Find(&opts); err != nil {
+		return nil, nil, nil, fmt.Errorf("custom-fields: get options: %w", err)
+	}
+	var assigns []CustomFieldProject
+	if err := s.Table("custom_field_projects").Where("custom_field_definition_id = ?", d.ID).Find(&assigns); err != nil {
+		return nil, nil, nil, fmt.Errorf("custom-fields: get assignment: %w", err)
+	}
+	pids := make([]int64, 0, len(assigns))
+	for _, a := range assigns {
+		if a.ProjectID != 0 { // omit the global sentinel from the response list
+			pids = append(pids, a.ProjectID)
+		}
+	}
+	return d, opts, pids, nil
+}
+
+// ReadAll lists all definitions. If projectID > 0, filters to fields that apply
+// to that project (global sentinel OR a row for that project).
+func ReadAll(s *xorm.Session, projectID int64) ([]CustomFieldDefinition, error) {
+	var defs []CustomFieldDefinition
+	if projectID == 0 {
+		if err := s.Table("custom_field_definitions").OrderBy("display_order asc").Find(&defs); err != nil {
+			return nil, fmt.Errorf("custom-fields: list definitions: %w", err)
+		}
+		return defs, nil
+	}
+	// Fields applying to projectID: those with a custom_field_projects row where
+	// project_id = projectID OR project_id = 0 (global).
+	subQuery := "(SELECT DISTINCT custom_field_definition_id FROM custom_field_projects WHERE project_id = ? OR project_id = 0)"
+	if err := s.Table("custom_field_definitions").Where("id IN "+subQuery, projectID).OrderBy("display_order asc").Find(&defs); err != nil {
+		return nil, fmt.Errorf("custom-fields: list definitions by project: %w", err)
+	}
+	return defs, nil
+}
+
+// Update replaces the definition and its options + assignment wholesale (PUT
+// full-replace). It does NOT touch custom_field_values (S3's table). No event
+// (deferred). The handler captures no `old` state.
+func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []CustomFieldOption, projectIDs []int64) (*CustomFieldDefinition, error) {
+	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
+	if err != nil {
+		return nil, fmt.Errorf("custom-fields: check old definition: %w", err)
+	}
+	if !has {
+		return nil, ErrCustomFieldNotFound{ID: d.ID}
+	}
+	if err := validateDefinition(d, options); err != nil {
+		return nil, err
+	}
+	if err := validateAssignment(s, projectIDs); err != nil {
+		return nil, err
+	}
+	// AllCols writes every column including zero values (xorm's Update skips
+	// zero-valued cols by default, which would break PUT full-replace for
+	// cleared fields, display_order=0, field_config.required=false, etc.).
+	// UseBool ensures the bools inside FieldConfig are not skipped either.
+	// (Mirrors upstream label.go's explicit .Cols(...) approach.)
+	if _, err := s.Table("custom_field_definitions").ID(d.ID).AllCols().UseBool().Update(d); err != nil {
+		return nil, fmt.Errorf("custom-fields: update definition: %w", err)
+	}
+	if err := setOptions(s, d.ID, d.Type, options); err != nil {
+		return nil, err
+	}
+	if err := setAssignment(s, d.ID, projectIDs); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// Delete hard-cascades the definition's OWN rows: definition + options +
+// assignment. It does NOT touch custom_field_values (S3's table). No event
+// (deferred).
+func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
+	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
+	if err != nil {
+		return fmt.Errorf("custom-fields: check definition: %w", err)
+	}
+	if !has {
+		return ErrCustomFieldNotFound{ID: d.ID}
+	}
+	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", d.ID).Delete(&CustomFieldOption{}); err != nil {
+		return fmt.Errorf("custom-fields: delete options: %w", err)
+	}
+	if _, err := s.Table("custom_field_projects").Where("custom_field_definition_id = ?", d.ID).Delete(&CustomFieldProject{}); err != nil {
+		return fmt.Errorf("custom-fields: delete assignment: %w", err)
+	}
+	if _, err := s.Table("custom_field_definitions").ID(d.ID).Delete(&CustomFieldDefinition{}); err != nil {
+		return fmt.Errorf("custom-fields: delete definition: %w", err)
+	}
+	return nil
+}
+
 // CustomFieldsPlugin is the main plugin struct. All capabilities (tables, routes)
 // are methods added to this struct in later tasks.
 type CustomFieldsPlugin struct{}
