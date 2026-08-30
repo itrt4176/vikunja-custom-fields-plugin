@@ -16,20 +16,35 @@ import (
 	"xorm.io/xorm"
 )
 
-// CustomFieldDefinition is a single custom field's schema. S2 adds columns
-// (description, constraints, project assignment, etc.) to this struct.
+// FieldConfig holds a field definition's scalar constraints. xorm serializes it
+// to a JSON column (TEXT under sqlite, JSON/JSONB under mysql/postgres) — the
+// same xorm:"json" mechanism api_tokens.APIPermissions uses. If the Task 1 spike
+// chose text+manual, swap this tag to `xorm:"text null"` and marshal in the model
+// methods (Task 7); the Go type stays the same.
+type FieldConfig struct {
+	Required  bool     `json:"required,omitempty"`
+	Default   string   `json:"default,omitempty"`
+	Min       *float64 `json:"min,omitempty"` // integer/decimal range; pointer so 0 ≠ unset
+	Max       *float64 `json:"max,omitempty"`
+	IsAPIOnly bool     `json:"is_api_only,omitempty"` // PRD stretch; S3 owns behavior
+}
+
+// CustomFieldDefinition is a single custom field's schema.
 type CustomFieldDefinition struct {
-	ID      int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
-	Name    string    `xorm:"varchar(255) not null" json:"name"`
-	Type    string    `xorm:"varchar(50) not null" json:"type"`
-	Created time.Time `xorm:"created not null" json:"-"`
-	Updated time.Time `xorm:"updated not null" json:"-"`
+	ID           int64       `xorm:"bigint autoincr not null unique pk" json:"id"`
+	Name         string      `xorm:"varchar(255) not null" json:"name"`
+	Type         string      `xorm:"varchar(50) not null" json:"type"`
+	Description  string      `xorm:"varchar(500) null" json:"description,omitempty"`
+	FieldConfig  FieldConfig `xorm:"json null" json:"field_config"`
+	DisplayOrder int         `xorm:"int not null default 0" json:"display_order"`
+	Created      time.Time   `xorm:"created not null" json:"-"`
+	Updated      time.Time   `xorm:"updated not null" json:"-"`
 }
 
 func (CustomFieldDefinition) TableName() string { return "custom_field_definitions" }
 
-// CustomFieldValue is one field's value on one task. S3 refines value typing and adds
-// the UNIQUE(field, task) constraint and query indexes.
+// CustomFieldValue is one field's value on one task. S3 refines value typing and
+// adds the UNIQUE(field, task) constraint and query indexes.
 type CustomFieldValue struct {
 	ID                      int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
 	CustomFieldDefinitionID int64     `xorm:"bigint not null" json:"custom_field_definition_id"`
@@ -40,6 +55,31 @@ type CustomFieldValue struct {
 }
 
 func (CustomFieldValue) TableName() string { return "custom_field_values" }
+
+// CustomFieldOption is one row of a select/multiselect field's option list.
+type CustomFieldOption struct {
+	ID                      int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
+	CustomFieldDefinitionID int64     `xorm:"bigint not null index" json:"custom_field_definition_id"`
+	Value                   string    `xorm:"varchar(255) not null" json:"value"`
+	Label                   string    `xorm:"varchar(255) null" json:"label,omitempty"`
+	DisplayOrder            int       `xorm:"int not null default 0" json:"display_order"`
+	Created                 time.Time `xorm:"created not null" json:"-"`
+	Updated                 time.Time `xorm:"updated not null" json:"-"`
+}
+
+func (CustomFieldOption) TableName() string { return "custom_field_options" }
+
+// CustomFieldProject assigns a field to a project. ProjectID 0 is the sentinel
+// for "all projects"; a specific ID means that project only. The handler enforces
+// that a field has either the 0-row or ≥1 specific rows, never both.
+type CustomFieldProject struct {
+	ID                      int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
+	CustomFieldDefinitionID int64     `xorm:"bigint not null index" json:"custom_field_definition_id"`
+	ProjectID               int64     `xorm:"bigint not null index" json:"project_id"`
+	Created                 time.Time `xorm:"created not null" json:"-"`
+}
+
+func (CustomFieldProject) TableName() string { return "custom_field_projects" }
 
 // whitelist holds the lowercase usernames permitted to manage custom fields.
 // Populated once in Init() from Vikunja's config (customfields.whitelist,
@@ -110,10 +150,14 @@ func (p *CustomFieldsPlugin) Shutdown() error {
 // so a TableName() method is invisible to xorm and the table name must be passed
 // explicitly via tx.Table(name).Sync2(&T{}) — not Sync2(new(T)), which would
 // produce an empty table name and a SQL syntax error. See upstream PR #3549.
+//
+// This migration is modified in place across stories (pattern B: unreleased
+// feature, project_views precedent) until the plugin runs in production, after
+// which further schema changes become append-only new migrations.
 func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 	return []*xormigrate.Migration{{
 		ID:          "20260829160000-create-custom-field-tables",
-		Description: "Create custom_field_definitions and custom_field_values",
+		Description: "Create custom field definition, value, option, and project-assignment tables",
 		Migrate: func(tx *xorm.Engine) error {
 			if err := tx.Table("custom_field_definitions").Sync2(&CustomFieldDefinition{}); err != nil {
 				return fmt.Errorf("custom-fields: sync definitions: %w", err)
@@ -121,11 +165,17 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 			if err := tx.Table("custom_field_values").Sync2(&CustomFieldValue{}); err != nil {
 				return fmt.Errorf("custom-fields: sync values: %w", err)
 			}
+			if err := tx.Table("custom_field_options").Sync2(&CustomFieldOption{}); err != nil {
+				return fmt.Errorf("custom-fields: sync options: %w", err)
+			}
+			if err := tx.Table("custom_field_projects").Sync2(&CustomFieldProject{}); err != nil {
+				return fmt.Errorf("custom-fields: sync assignments: %w", err)
+			}
 			return nil
 		},
 		Rollback: func(tx *xorm.Engine) error {
-			// Drop in dependency order: values reference definitions.
-			return tx.DropTables("custom_field_values", "custom_field_definitions")
+			// Drop in dependency order: values + options + assignments reference definitions.
+			return tx.DropTables("custom_field_values", "custom_field_options", "custom_field_projects", "custom_field_definitions")
 		},
 	}}
 }
