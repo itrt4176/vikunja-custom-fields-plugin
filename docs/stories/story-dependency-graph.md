@@ -77,7 +77,7 @@ without slipping the final S7 ship date.
 **S1 → S8 → S2 → S3 → S5 → S7**
 
 - [x] **S1** — Plugin Foundation
-- [ ] **S8** — Config Whitelist
+- [x] **S8** — Config Whitelist
 - [ ] **S2** — Field Definition API
 - [ ] **S3** — Task Field Values API
 - [ ] **S5** — Custom Fields on Task Detail
