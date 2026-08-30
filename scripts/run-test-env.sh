@@ -86,7 +86,21 @@ JWT=$(login_user "$TEST_USER" "testpassword")
 JWT_OTHERUSER=$(login_user "otheruser" "testpassword")
 echo "   Logged in (testuser + otheruser)"
 
-# ── Step 5: Print result ────────────────────────────────────────
+# ── Step 5: Seed a test project (for assignment-validation ACs) ──
+echo "==> Creating a test project via the API..."
+PROJECT_RESPONSE=$(curl -s -X POST "$BASE_URL/api/v2/projects" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Test Project"}')
+PROJECT_ID=$(echo "$PROJECT_RESPONSE" | jq -r .id)
+if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" = "null" ]; then
+  echo "WARNING: project create response: $PROJECT_RESPONSE"
+else
+  echo "   Test project created (id $PROJECT_ID)"
+fi
+export PROJECT_ID
+
+# ── Step 6: Print result ────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Vikunja test instance ready                                 ║"
