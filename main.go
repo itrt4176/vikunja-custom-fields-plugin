@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"code.vikunja.io/api/pkg/db"
+	"code.vikunja.io/api/pkg/events"
 	"code.vikunja.io/api/pkg/log"
 	"code.vikunja.io/api/pkg/models"
 	"code.vikunja.io/api/pkg/plugins"
 	"code.vikunja.io/api/pkg/user"
 
+	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/labstack/echo/v5"
 	"github.com/spf13/viper"
 	"src.techknowlogick.com/xormigrate"
@@ -1518,6 +1520,41 @@ func deleteOneValueHandler(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// taskDeletedListener deletes a task's custom field values (and their select
+// child rows) when the host deletes the task. The host dispatches task.deleted
+// asynchronously after its transaction commits, so the listener opens its own
+// session. There is no DB-level FK cascade (the label_tasks table shape), so
+// the two deletes are ordered: child rows reference the value id, not the task.
+type taskDeletedListener struct{}
+
+func (l *taskDeletedListener) Handle(msg *message.Message) error {
+	var evt models.TaskDeletedEvent
+	if err := json.Unmarshal(msg.Payload, &evt); err != nil {
+		log.Errorf("[custom-fields] task-deleted listener unmarshal: %v", err)
+		return err
+	}
+	if evt.Task == nil {
+		log.Errorf("[custom-fields] task-deleted listener: nil task in payload, skipping")
+		return nil
+	}
+	s := db.NewSession()
+	defer s.Close()
+	// Delete child rows first (no hard FK cascade), then the value rows.
+	if _, err := s.Table("custom_field_value_options").
+		Where("custom_field_value_id IN (SELECT id FROM custom_field_values WHERE task_id = ?)", evt.Task.ID).
+		Delete(&CustomFieldValueOption{}); err != nil {
+		return fmt.Errorf("custom-fields: cascade-delete value-options for task %d: %w", evt.Task.ID, err)
+	}
+	if _, err := s.Table("custom_field_values").
+		Where("task_id = ?", evt.Task.ID).
+		Delete(&CustomFieldValue{}); err != nil {
+		return fmt.Errorf("custom-fields: cascade-delete values for task %d: %w", evt.Task.ID, err)
+	}
+	return s.Commit()
+}
+
+func (l *taskDeletedListener) Name() string { return "custom-fields-task-deleted" }
+
 // CustomFieldsPlugin is the main plugin struct. All capabilities (tables, routes)
 // are methods added to this struct in later tasks.
 type CustomFieldsPlugin struct{}
@@ -1527,6 +1564,7 @@ func (p *CustomFieldsPlugin) Version() string { return "0.1.0" }
 
 func (p *CustomFieldsPlugin) Init() error {
 	whitelist = loadWhitelist()
+	events.RegisterListener((&models.TaskDeletedEvent{}).Name(), &taskDeletedListener{})
 	log.Infof("[custom-fields] plugin v0.1.0 initialized")
 	return nil
 }
