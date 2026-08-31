@@ -12,7 +12,10 @@ write values through the plugin API; values are validated against their field
 definitions, cascade-deleted when a task is removed, and never appear for projects
 that don't have those fields assigned. When a field definition is deleted, its values
 are cascade-deleted; when a definition is changed, values that become incompatible are
-absent from the read response but remain stored (recoverable on revert).
+absent from the read response but remain stored — recoverable on revert for scalar
+type/constraint changes and option reorder/relabel, but destructive (not recovered by
+re-adding the option) for option-value-change and option-removal (see Definition
+lifecycle).
 
 The API is authored as if it were a native `/api/v2/tasks/{task}/custom-fields`
 resource, just served from the plugin route prefix. Every decision — data model, verb
@@ -245,9 +248,11 @@ guard, not a *referential* guard; no model restricts a column once data exists).
 **Decision:** definition change → **free edit; no block; incompatible values are a
 read-path concern (drop-on-read).** A value that fails coercion against the field's
 *current* type+constraints is absent from the read response — same mechanism as AC#4's
-project-assignment filter (both produce "absent," both non-destructive). Recoverable:
-revert the edit and the value reappears. The management UI (S9) may warn on destructive
-edits (the delete-confirm pattern extended), but that's S9's call.
+project-assignment filter (both produce "absent," both non-destructive). Recoverability
+is *scoped* (see Recoverability, scoped below): revert recovers the value for scalar
+type/constraint changes and select reorder/relabel, but not for select option-value-
+change/removal (destructive). The management UI (S9) may warn on destructive edits (the
+delete-confirm pattern extended), but that's S9's call.
 
 ### The `valid:"required"` semantics (settled the write-path required policy)
 
@@ -532,9 +537,13 @@ Two independent filters govern the read response, with two different answers:
 axis (`null` if absent or invalid); the `field` metadata is always present when the key
 is present.** `null` does double duty (unset and invalid both mean "no valid value to
 show") — this is the *intentional* tolerate-stale-silently behavior: the broken bit
-doesn't get a distinct representation, it looks unset. If the manager re-adds the
-`draft` option, the stored value reappears with no one the wiser — recoverable, no
-special handling.
+doesn't get a distinct representation, it looks unset. For a *scalar* field (e.g. an
+integer whose `min` constraint was tightened past the stored value), reverting the
+constraint re-validates the unchanged stored string and the value reappears — recoverable,
+no special handling. For a *select* field whose `draft` option was removed, the child row
+is orphaned against a deleted option ID; re-adding `draft` gets a fresh ID, so the orphaned
+row does **not** reappear (see the `setOptions` re-creation interaction — that's the
+destructive edge of the change policy, surfaced by S9's warning).
 
 A field with `value: null` and the field present means "this field belongs on this task
 (AC#4) but has no valid value." A field absent from the map means "this field is not
@@ -618,7 +627,17 @@ blocked when dependent data exists. The `resolveBucketID` philosophy (`:388`): t
 stale stored values rather than lock the client. A value that fails coercion against the
 field's *current* type+constraints is absent from the read response — same mechanism as
 the project-assignment filter (AC#4), both produce "absent," both non-destructive.
-Recoverable: revert the edit and the value reappears.
+
+**Recoverability, scoped:** revert recovers the value for *scalar* type/constraint
+changes (the stored string is unchanged; reverting the constraint re-validates it) and
+for *select* option reorder/relabel (the `setOptions` fix preserves option IDs, so the
+child row's reference stays valid). Revert does **not** recover the value for *select
+option-value-change* or *option-removal*: the child row is orphaned against a deleted
+option ID, and re-adding the option gets a fresh autoincr ID, so the dead child row still
+references the old ID and stays dropped on read. These two edits are the *destructive*
+edge of the otherwise-tolerant change policy — accepted because the alternative (blocking
+the edit) has no precedent, and because S9's management-UI warning (AC#9) surfaces the
+consequence to the manager before they commit.
 
 ### The `setOptions` re-creation interaction (S3 modifies S2's `setOptions`)
 
@@ -639,20 +658,33 @@ options, delete for removed options — not delete-all-reinsert-all. This keeps 
 child-table design sound: reordering/relabeling preserves option IDs → stored select
 values survive; only editing a value's underlying option, or adding/removing an option,
 orphans the values referencing the changed/removed option (correct — those values no
-longer have a valid target). The change is in `main.go` (S2's file, modified by S3 under
-the pattern-B unreleased-migration regime); the existing `setOptions` tests in S2's
-resolution are the regression guard.
+longer have a valid target). The change is a **code** change in `main.go` (S2's file,
+which S3 may modify because the plugin hasn't shipped — the same unreleased-feature
+freedom that lets S3 modify S2's migration, applied here to S2's `setOptions` logic);
+it is **not** a migration change (no schema is affected — the child table's option-id
+reference is unchanged; only the *stability* of the option ids changes). The existing
+S2 behavior is the regression guard.
 
 ### The recoverability asymmetry (the load-bearing reason)
 
 - *Delete* removes the parent → children are **unrecoverable** → cascade (team/project
   precedent, no dead storage).
-- *Change* keeps the parent → children are **recoverable** (revert the edit) → tolerate
-  stale at read (ProjectView/resolveBucketID, don't lock, don't destroy).
+- *Change* keeps the parent → children are **mostly recoverable** (revert the edit) →
+  tolerate stale at read (ProjectView/resolveBucketID, don't lock, don't destroy). The
+  exception: select option-value-change and option-removal orphan the child row against
+  a deleted option ID, and re-adding the option gets a fresh ID, so revert does not
+  recover those — they are destructive (see `setOptions` re-creation interaction). This
+  is the deliberate price of the update-in-place `setOptions` design (which avoids the
+  far worse outcome of orphaning *all* select values on any option edit).
 
-Rejected alternatives: orphaning (label, buggy, unrecoverable); block-on-edit
-(unprecedented); write-time purge (destroys recoverable data, against the
-tolerate-stale philosophy). Each is worse on its axis.
+Rejected alternatives: block-on-edit (unprecedented — no Vikunja model blocks an edit
+because referenced data exists); write-time purge of all values on any definition change
+(destroys recoverable data for the scalar/reorder/relabel cases that don't need it,
+against the tolerate-stale philosophy); *unconditional* orphaning (the label pattern,
+buggy, and — before the `setOptions` fix — would have orphaned *all* select values on
+every option edit). The chosen design orphans *only* on option-value-change/removal
+(where the orphan is correct — the value no longer has a valid target), not on every
+edit. Each rejected alternative is worse on its axis.
 
 ## The write-path policy
 
@@ -665,10 +697,12 @@ complete set:
   excluded by construction (it's the (B) write).
 
 So the "edit field 3 while field 12 is stale" scenario is **stale-safe**: no (A) write
-forces a decision on field 12. The stale value stays stored, reads `null`, and is
-recoverable. Under (B) (inline-in-task-body), the task `PUT`/`PATCH` would carry all
-values into full-body validation, tripping on stale 12 — a native property of full-body
-validation, not a bridge artifact. (A) avoids it by design.
+forces a decision on field 12. The stale value stays stored and reads `null` (its
+recoverability depends on what made it stale — see Recoverability, scoped). The point
+here is the *write* safety: editing field 3 never forces field 12 into validation, so a
+stale 12 doesn't block the edit. Under (B) (inline-in-task-body), the task `PUT`/`PATCH`
+would carry all values into full-body validation, tripping on stale 12 — a native
+property of full-body validation, not a bridge artifact. (A) avoids it by design.
 
 `required` is a value-shape constraint (a *sent* value must be non-empty), not a
 cross-field present-rule (no precedent for "every write must include this field").
@@ -828,14 +862,16 @@ vikunja module). No unit tests of plugin source.
 | 3. Validation | Invalid value (non-numeric for integer, option not in list for select, bad date) → 400; valid value → persisted. |
 | 4. Fields not assigned to the task's project absent | Create a field assigned to project A; `GET` values for a task in project B (field not assigned) → field absent from the map. |
 | 5. Non-members cannot read/write | Same calls with a non-member's JWT → 403 on all verbs. |
-| 6. Task delete cascades values | `DELETE /api/v1/tasks/{id}` (native) → `custom_field_values` rows for that task gone (verify via `sqlite3`; the listener fires async — wait/poll). |
+| 6. Task delete cascades values | `DELETE /api/v1/tasks/{id}` (native) → `custom_field_values` + `custom_field_value_options` rows for that task gone (verify via `sqlite3`; the listener fires async — wait/poll). **Use a select-type field** so both a value row *and* its child `custom_field_value_options` row exist to verify — a scalar-only seed would pass vacuously for the child-row cascade leg. |
 | 7. Archive/move preserve values | Mark a task done (archive analog) → values intact; move task to another project → values intact (verify via `sqlite3`). |
-| 8. Definition delete cascades values | `DELETE .../definitions/{id}` (S2) → `custom_field_values` + `custom_field_value_options` rows for that definition gone (verify via `sqlite3`). **Seed a `custom_field_values` row before the delete** so the evidence is falsifiable (S2 noted its own AC#4 was vacuous because no values existed). |
+| 8. Definition delete cascades values | `DELETE .../definitions/{id}` (S2) → `custom_field_values` + `custom_field_value_options` rows for that definition gone (verify via `sqlite3`). **Seed a select-type field's value (a `custom_field_values` row *and* its `custom_field_value_options` child row) before the delete** so the two-step cascade is falsifiable: a scalar-only seed would have no child row, so the child-row cascade leg would pass vacuously (the same falsifiability gap S2 noted in its own AC#4 — no values existed). |
 
-**Test-instance seeding additions:** S3 needs a `custom_field_values` row seeded before
-the definition-delete test (AC#8) and before the task-delete test (AC#6) — add a seed
-step to `run-test-env.sh` or seed via the values API in the test flow. Per
-`CLAUDE.local.md`, this is a harness-modification point.
+**Test-instance seeding additions:** S3 needs a `custom_field_values` row *and* (for
+select-type fields) a `custom_field_value_options` child row seeded before the
+definition-delete test (AC#8) and before the task-delete test (AC#6) — use a select-type
+field so the two-step cascade has a child row to delete. Add a seed step to
+`run-test-env.sh` or seed via the values API in the test flow. Per `CLAUDE.local.md`,
+this is a harness-modification point.
 
 ## Git workflow
 
