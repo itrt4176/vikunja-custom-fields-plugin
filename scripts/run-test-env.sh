@@ -100,6 +100,32 @@ else
 fi
 export PROJECT_ID
 
+# ── Step 5b: Seed a custom field definition + a task ────────────
+echo "==> Creating a custom field definition (whitelist-gated)..."
+FIELD_RESPONSE=$(curl -s -X POST "$BASE_URL/api/v1/plugins/custom-fields/definitions" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Priority","type":"integer","project_ids":['"$PROJECT_ID"']}')
+FIELD_ID=$(echo "$FIELD_RESPONSE" | jq -r .id)
+if [ -z "$FIELD_ID" ] || [ "$FIELD_ID" = "null" ]; then
+  echo "WARNING: field create response: $FIELD_RESPONSE"
+else
+  echo "   Custom field created (id $FIELD_ID)"
+fi
+
+echo "==> Creating a task in the test project..."
+TASK_RESPONSE=$(curl -s -X POST "$BASE_URL/api/v2/projects/$PROJECT_ID/tasks" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"seeded task"}')
+TASK_ID=$(echo "$TASK_RESPONSE" | jq -r .id)
+if [ -z "$TASK_ID" ] || [ "$TASK_ID" = "null" ]; then
+  echo "WARNING: task create response: $TASK_RESPONSE"
+else
+  echo "   Task created (id $TASK_ID)"
+fi
+export FIELD_ID TASK_ID
+
 # ── Step 6: Print result ────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -111,6 +137,10 @@ echo "║                                                              ║"
 echo "║  Non-whitelisted user (is_manager should be false):          ║"
 echo "║    export JWT_OTHERUSER=\"$JWT_OTHERUSER\"                   ║"
 echo "║    export PROJECT_ID=\"$PROJECT_ID\"                         ║"
+echo "║                                                              ║"
+echo "║  Seeded plugin fixtures (for AC verification):               ║"
+echo "║    export FIELD_ID=\"$FIELD_ID\"                             ║"
+echo "║    export TASK_ID=\"$TASK_ID\"                               ║"
 echo "║                                                              ║"
 echo "║  Verify the whitelist:                                       ║"
 echo "║    curl -s -H \"Authorization: Bearer \$JWT\" \\               ║"
