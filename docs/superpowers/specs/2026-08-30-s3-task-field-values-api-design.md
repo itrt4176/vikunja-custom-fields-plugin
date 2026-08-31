@@ -17,11 +17,15 @@ absent from the read response but remain stored (recoverable on revert).
 The API is authored as if it were a native `/api/v2/tasks/{task}/custom-fields`
 resource, just served from the plugin route prefix. Every decision — data model, verb
 conventions, read/write shapes, authorization, the definition lifecycle — mirrors
-upstream Vikunja so that moving the feature into core is a mechanical prefix swap, not
-a redesign. The one structural constraint (the native task response can't be augmented
-under yaegi) is recorded in AC#1's amendment; the values API is a dedicated resource
-that the frontend (S5) merges into the task detail view — the assignees/labels pattern,
-not the inlined-task-body pattern.
+upstream Vikunja so that moving the feature into core minimizes the upstreaming cost.
+The values API routes port by two ordered mechanical swaps (see Route-base-prefix
+portability); the remaining upstreaming work (Echo→huma, `*user.User`→`web.Auth`,
+response maps→structs, the `xorm:"-"` computed field on `models.Task`) is enumerated
+below as known conversion points, not as a trivial prefix swap. The one structural
+constraint (the native task response can't be augmented under yaegi) is recorded in
+AC#1's amendment; the values API is a dedicated resource that the frontend (S5) merges
+into the task detail view — the assignees/labels pattern, not the inlined-task-body
+pattern.
 
 ## Context — decisions were grounded in upstream evidence, not assumption
 
@@ -134,15 +138,22 @@ field, like `Reactions`."
 ### The route-base-prefix portability (settled the route paths)
 
 The plugin route prefix is `/api/v1/plugins/custom-fields` (the group, not the base).
-All routes — definitions and values — are portable by a single
-`s|/api/v1/plugins/custom-fields|/api/v2|` swap:
-- `/api/v1/plugins/custom-fields/definitions` → `/api/v2/custom-fields/definitions`
-- `/api/v1/plugins/custom-fields/tasks/{task}/custom-fields/{field_id}` →
-  `/api/v2/tasks/{task}/custom-fields/{field_id}`
+All routes — definitions and values — are portable by two ordered mechanical swaps:
 
-The `custom-fields` resource segment in the values path survives the swap unchanged (it
-is after the group). The definitions path has no double-segment. The resource name
-shares a name with its group — purely lexical, zero routing consequence.
+1. `/api/v1/plugins/custom-fields/tasks` → `/api/v2/tasks` (the values path —
+   consumes the `custom-fields` group segment + the `tasks` resource segment).
+   `/api/v1/plugins/custom-fields/tasks/{task}/custom-fields/{field_id}` →
+   `/api/v2/tasks/{task}/custom-fields/{field_id}`.
+2. `/api/v1/plugins` → `/api/v2` (the definitions path — the remaining `custom-fields`
+   segment becomes the native `custom-fields` resource). Applied after step 1, so it
+   only touches the definitions path. `/api/v1/plugins/custom-fields/definitions` →
+   `/api/v2/custom-fields/definitions`.
+
+Step 1 runs first and consumes the `custom-fields/tasks` segment on the values path;
+step 2 then handles the definitions path (which step 1 did not touch). Both are
+mechanical string substitutions, but there are two of them, applied in order, not one.
+The values path's `custom-fields` resource segment (the second one, after `{task}`)
+survives step 1 unchanged — it is after the `tasks` segment that step 1 replaces.
 
 ### Task access checks (settled the authorization approach)
 
@@ -241,11 +252,13 @@ edits (the delete-confirm pattern extended), but that's S9's call.
 ### The `valid:"required"` semantics (settled the write-path required policy)
 
 `valid:"required"` is govalidator's `Required` — a **value-shape check** (the value,
-when present, must be non-empty), paired everywhere with `xorm:"not null"` +
-`minLength:"1"` (`api_tokens.go:44`, `project.go:43`, `teams.go:38`, `reaction.go:51`).
-There is no cross-field "this field must be present in every payload" rule — no Vikunja
-model 400s because a required field was *omitted* from a PUT. `required` is about the
-value's shape when set, not "every write must include this field."
+when present, must be non-empty), typically paired with `xorm:"not null"` +
+`minLength:"1"` (`api_tokens.go:44`, `project.go:43`, `teams.go:38`). `reaction.go:51`
+pairs it with `maxLength:"20"` only (no `minLength`) — `required` alone is the value-shape
+check; the `minLength`/`maxLength` are separate constraints. The point: there is no
+cross-field "this field must be present in every payload" rule — no Vikunja model 400s
+because a required field was *omitted* from a PUT. `required` is about the value's shape
+when set, not "every write must include this field."
 
 **Decision:** the values-write path validates *sent* values' type + constraints
 (including `required` as non-empty for a sent value) but does **not** 400 for *omitting*
@@ -253,14 +266,25 @@ a required field. "Required" means "a written value must be non-empty," not "the
 can't be cleared." Omission under `PUT` (full-replace) clears; omission under `PATCH`
 (merge, the upstream target) leaves unchanged. Neither 400s for omission.
 
-### The autopatch behavior (settled why (A) is stale-safe)
+### The autopatch behavior (the upstream target — why (A) stays stale-safe after porting)
 
-`EnableAutoPatch` (`huma.go:165`) calls `autopatch.AutoPatch(api)` which synthesizes a
-`PATCH` for every resource with GET+PUT. The synthesized `PATCH` does a
-**GET → apply merge-patch → PUT** round-trip (`autopatch.go:152`): the server `GET`s the
-current resource, merges the patch body onto it, and `PUT`s the merged result. The
-merged body is a *complete* resource, validated as a whole by `validateInputBody`
-(`validation.go:34`, which runs `govalidator.ValidateStruct` on the full bound body).
+**`huma` is not available to the yaegi plugin** (confirmed: no `huma` symbol file in
+`pkg/yaegi_symbols/`). The plugin registers routes via Echo
+(`RegisterAuthenticatedRoutes(g *echo.Group)`); it has no huma operations, no
+`EnableAutoPatch`, and no synthesized `PATCH`. This section describes the *upstream
+target* — what happens when the values resource ports to native `/api/v2/...` and is
+registered with huma — to confirm that (A) stays stale-safe *after* upstreaming, not
+during the plugin phase. The plugin's stale-safety (this phase) stands on the "no (A)
+write carries the complete set" basis alone (see Write-path policy); autopatch is not
+load-bearing for the plugin.
+
+`EnableAutoPatch` (`pkg/routes/api/v2/huma.go:165`) calls `autopatch.AutoPatch(api)`
+which synthesizes a `PATCH` for every resource with GET+PUT. The synthesized `PATCH` does
+a **GET → apply merge-patch → PUT** round-trip (`autopatch.go:152` in the huma library):
+the server `GET`s the current resource, merges the patch body onto it, and `PUT`s the
+merged result. The merged body is a *complete* resource, validated as a whole by
+`validateInputBody` (`validation.go:34`, which runs `govalidator.ValidateStruct` on the
+full bound body).
 
 Under **(A)** (dedicated values resource with per-field `GET`+`PUT`): autopatch
 synthesizes a **per-field** `PATCH /custom-fields/{field_id}` — the merge is on *one
@@ -374,8 +398,17 @@ The `Value` column stores scalars as strings, validated and coerced per type:
 | decimal | `strconv.FormatFloat` | `strconv.ParseFloat` succeeds; min/max if set |
 | date | ISO `2006-01-02` | `time.Parse(dateFormat)` |
 | datetime | RFC3339 | `time.Parse(time.RFC3339)` |
-| select | (child table) | option_id must be in the field's current options |
-| multiselect | (child table) | each option_id must be in the field's current options |
+| select | (child table) | the option value string must be in the field's current options' values |
+| multiselect | (child table) | each option value string must be in the field's current options' values |
+
+A select value is written and read as the **option value string** (e.g. `"draft"`),
+not the option's numeric ID — the consumer-facing identity of an option is its value,
+matching how a select field is rendered (the user picks a label, the value is stored).
+The write path resolves the value string to the option's ID internally for storage in
+the child table (`custom_field_value_options`); the read path joins
+`custom_field_value_options` → `custom_field_options` to resolve the stored option IDs
+back to value strings. This keeps the write/read symmetric on the value string and
+hides the storage ID from the API consumer.
 | checkbox | `"true"`/`"false"` | bool coercion |
 | url | URL string | `url.Parse` + scheme present; non-empty if required |
 
@@ -418,6 +451,22 @@ tripping on any stale field. (A) excludes it by construction (collections upsert
 item-delete; no Vikunja collection has a replace-all `PUT`). The one-request full-replace
 use case (rare) is diff-then-`DELETE`-then-`POST` — accepted as the price of (A).
 
+**Semantic asymmetry between the two `POST`s:** the bulk `POST /custom-fields` is
+**upsert** (create-or-overwrite per item — listed fields are written whether or not they
+existed), while the per-field `POST /custom-fields/{field_id}` is **create-only** (409 if
+the field is already set). This is a deliberate difference: the bulk `POST` is the
+"save these values" operation (the client knows the current state and wants to set N
+fields); the per-field `POST` is the strict "create this one value, fail if it exists"
+operation (for an API consumer who wants create-or-conflict semantics on a single field).
+`PUT /custom-fields/{field_id}` is the **replace-only** operation (404 if absent — matches
+the comments precedent, `TaskComment.Update` returns `ErrTaskCommentDoesNotExist` when
+`updated == 0`). A client that wants "create-or-update a single field" uses the bulk
+`POST` with one item (which upserts), not the per-field `PUT` (which 404s on a missing
+value). The per-field `POST` (create) and `PUT` (replace) are the strict-CRUD pair;
+the bulk `POST` is the permissive save-all. This matches the assignees/labels precedent:
+assignees are `POST` (create) + `POST /bulk` (add-many) + `DELETE`, where the bulk add is
+not a batch-replace.
+
 `{field_id}` = the `custom_field_definition_id` (the sub-resource is identified by the
 associated entity's id, like assignees use `{user}` and labels use `{label}`).
 
@@ -452,7 +501,7 @@ shape as S2's `definitionToMap`). The map is keyed by `definition_id` as a strin
 
 ### Write request shapes
 
-**Bulk `POST`** (upsert): `[{ "custom_field_definition_id": 3, "value": 2 }, { "custom_field_definition_id": 12, "value": "draft" }]`
+**Bulk `POST`** (upsert): `[{ "custom_field_definition_id": 3, "value": 2 }, { "custom_field_definition_id": 12, "value": "draft" }]` (single-select value is the option value string; multiselect value is an array of option value strings, e.g. `"value": ["draft", "published"]`; scalar types use the native JSON type).`
 
 **Per-field `POST`/`PUT`**: `{ "value": 2 }` — just the value body (the `field_id` is in
 the URL). `POST` creates (409 if already set); `PUT` replaces (404 if absent).
@@ -495,15 +544,29 @@ representations — the key-presence axis (AC#4) is separate from the value axis
 ## Authorization (AC#5)
 
 ```
-CustomFieldValue.CanRead(s, u)     → task.CanRead(s, u)    or plugin-local equivalent
+CustomFieldValue.CanRead(s, u)    → task.CanRead(s, u)    or plugin-local equivalent
 CustomFieldValue.CanCreate(s, u)  → task.CanUpdate(s, u)  or plugin-local equivalent
-CustomFieldValue.CanUpdate(s, u)   → task.CanUpdate(s, u)  or plugin-local equivalent
-CustomFieldValue.CanDelete(s, u)   → task.CanUpdate(s, u)  or plugin-local equivalent
+CustomFieldValue.CanUpdate(s, u)  → task.CanUpdate(s, u)  or plugin-local equivalent
+CustomFieldValue.CanDelete(s, u)  → task.CanUpdate(s, u)  or plugin-local equivalent
 ```
 
 Read → `CanRead`; write (create/update/delete) → `CanUpdate` (mirroring
 `tasks_permissions.go` where `CanCreate`/`CanUpdate`/`CanDelete` all delegate to
 `canDoTask` → `Project.CanWrite`).
+
+**`CanRead` return-arity:** the host's `task.CanRead` (`tasks_permissions.go:42`) returns
+`(canRead bool, maxPermission int, err error)` — **three** values — while the plugin's
+`CustomFieldValue.CanRead` (following S2's `*xorm.Session, *user.User` pattern) returns
+`(bool, error)`. The delegation discards the middle value:
+```go
+func (v *CustomFieldValue) CanRead(s *xorm.Session, u *user.User) (bool, error) {
+    t := &models.Task{ID: v.TaskID}
+    ok, _, err := t.CanRead(s, u) // approach (a): discard maxPermission
+    return ok, err
+}
+```
+`CanUpdate`/`CanCreate`/`CanDelete` are both `(bool, error)` in the host and match the
+plugin's arity directly; only `CanRead` has the extra `maxPermission` return.
 
 `task.ProjectID` resolved via `models.GetTaskByIDSimple(s, id)` (no `web.Auth`,
 reachable). User via `user.GetCurrentUserFromDB(s, c)`. Spike 2 confirms whether approach
@@ -515,13 +578,15 @@ Either way, the `CanX` signature is `*user.User` (S2's pattern).
 
 A pure `validateValue(def *CustomFieldDefinition, options []CustomFieldOption, raw
 interface{}) (storageString, error)` mirroring S2's `validateDefinition` — no DB access,
-called before every write. Returns the coerced storage string (or, for select-type
-values, the validated option IDs) or a typed error.
+called before every write. For scalar types, returns the coerced storage string. For
+select-type values, returns the validated option **value string(s)** — the write path
+resolves the value string to the option ID for child-table storage. The validation
+checks the value string against the field's current options' values.
 
 - **integer/decimal:** `strconv.ParseInt`/`ParseFloat`; min/max from `field_config`.
 - **date/datetime:** `time.Parse`; format per type.
-- **select:** option ID must be in the field's current options (`custom_field_options`).
-- **multiselect:** each option ID must be in the field's current options.
+- **select:** the option value string must be in the field's current options' values.
+- **multiselect:** each option value string must be in the field's current options' values.
 - **checkbox:** bool coercion.
 - **url:** `url.Parse` + scheme present.
 - **required:** a *sent* value for a required field must be non-empty (value-shape
@@ -554,6 +619,29 @@ stale stored values rather than lock the client. A value that fails coercion aga
 field's *current* type+constraints is absent from the read response — same mechanism as
 the project-assignment filter (AC#4), both produce "absent," both non-destructive.
 Recoverable: revert the edit and the value reappears.
+
+### The `setOptions` re-creation interaction (S3 modifies S2's `setOptions`)
+
+S2's `setOptions` (`main.go:299-313`) deletes ALL option rows for a definition and
+re-inserts them with **new auto-increment IDs** (it zeroes `options[i].ID = 0` before
+insert). The child table `custom_field_value_options` stores `CustomFieldOptionID` — so
+when any definition Update touches options (even a display_order-only reorder), every
+option ID changes, and every `custom_field_value_options` row referencing the old IDs
+becomes orphaned → the read path drops all stored select values → all stored select
+values silently vanish on a benign reorder. This is the most consequential
+cross-story interaction, and it makes the child-table design **worse** than the
+JSON-in-string alternative on option edits (with JSON-in-string, the stored value is
+self-contained — reordering options doesn't break it).
+
+**S3 fix:** modify `setOptions` to **preserve existing option IDs when the option value
+is unchanged** — update-in-place for existing options (reorder/relabel), insert for new
+options, delete for removed options — not delete-all-reinsert-all. This keeps the
+child-table design sound: reordering/relabeling preserves option IDs → stored select
+values survive; only editing a value's underlying option, or adding/removing an option,
+orphans the values referencing the changed/removed option (correct — those values no
+longer have a valid target). The change is in `main.go` (S2's file, modified by S3 under
+the pattern-B unreleased-migration regime); the existing `setOptions` tests in S2's
+resolution are the regression guard.
 
 ### The recoverability asymmetry (the load-bearing reason)
 
