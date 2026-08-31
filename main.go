@@ -1158,10 +1158,12 @@ func readValuesForTask(s *xorm.Session, taskID int64) (map[string]interface{}, e
 		d := &CustomFieldDefinition{ID: v.CustomFieldDefinitionID}
 		def, opts, pids, err := d.ReadOne(s)
 		if err != nil {
-			// definition deleted while its value row remains (S2 delete doesn't
-			// cascade to values yet — Task 7 fixes that): skip the orphan. Other
-			// failures are real and abort. yaegi can't type-assert interpreted
-			// errors (see toHTTPError), so discriminate by message prefix.
+			// definition deleted while its value row remains: skip the orphan.
+			// Task 7's definition delete cascades values synchronously, so this
+			// skip is purely defensive — reachable only via a path that bypassed
+			// the cascade, or a race. Other failures are real and abort. yaegi
+			// can't type-assert interpreted errors (see toHTTPError), so
+			// discriminate by message prefix.
 			if strings.HasPrefix(err.Error(), "custom field definition ") {
 				continue
 			}
