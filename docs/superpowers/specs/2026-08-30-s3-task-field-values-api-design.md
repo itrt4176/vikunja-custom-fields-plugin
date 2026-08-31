@@ -532,14 +532,19 @@ values, the validated option IDs) or a typed error.
 
 ### Delete → cascade (synchronous)
 
-S3 modifies S2's `CustomFieldDefinition.Delete` (`main.go:435`) to also delete from
-`custom_field_values` + `custom_field_value_options` by `custom_field_definition_id`,
-in the same transaction. The definition's delete *is* a plugin-owned transaction (unlike
-the task-delete, which is host-owned and can only be reached via the async listener).
-The team/project cascade precedent (cascade owned rows in one session). Orphaned values
-are unrecoverable dead storage, so orphaning (the label exception) is strictly worse.
-`CanDelete` guard point stays unused — cascade, not block (block-on-delete-if-referenced
-has zero precedent).
+S3 modifies S2's `CustomFieldDefinition.Delete` (`main.go:435`) to cascade-delete values
+and their child rows, in the same transaction. The cascade is two-step (no hard FK
+cascade — the `label_tasks` shape uses no DB-level constraints):
+1. Delete `custom_field_value_options` where `custom_field_value_id IN (SELECT id FROM
+   custom_field_values WHERE custom_field_definition_id = ?)` — the child rows reference
+   the value, not the definition, so they're deleted via a subquery on the value IDs.
+2. Delete `custom_field_values` where `custom_field_definition_id = ?`.
+
+The definition's delete *is* a plugin-owned transaction (unlike the task-delete, which is
+host-owned and can only be reached via the async listener). The team/project cascade
+precedent (cascade owned rows in one session). Orphaned values are unrecoverable dead
+storage, so orphaning (the label exception) is strictly worse. `CanDelete` guard point
+stays unused — cascade, not block (block-on-delete-if-referenced has zero precedent).
 
 ### Change → free edit, drop-on-read, no block
 
@@ -622,6 +627,13 @@ func (l *taskDeletedListener) Handle(msg *message.Message) error {
     }
     s := db.NewSession()
     defer s.Close()
+    // Delete child rows first (no hard FK cascade — the label_tasks shape uses
+    // no DB-level constraints), then the value rows themselves.
+    if _, err := s.Table("custom_field_value_options").
+        Where("custom_field_value_id IN (SELECT id FROM custom_field_values WHERE task_id = ?)", evt.Task.ID).
+        Delete(&CustomFieldValueOption{}); err != nil {
+        return fmt.Errorf("custom-fields: cascade-delete value-options for task %d: %w", evt.Task.ID, err)
+    }
     if _, err := s.Table("custom_field_values").
         Where("task_id = ?", evt.Task.ID).
         Delete(&CustomFieldValue{}); err != nil {
