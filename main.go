@@ -721,9 +721,9 @@ func (d *CustomFieldDefinition) Update(s *xorm.Session, u *user.User, options []
 	return d, nil
 }
 
-// Delete hard-cascades the definition's OWN rows: definition + options +
-// assignment. It does NOT touch custom_field_values (S3's table). No event
-// (deferred).
+// Delete hard-cascades the definition's OWN rows: values (S3, two-step via the
+// value-id subquery) + definition options + assignment + the definition row.
+// No event (deferred).
 func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	has, err := s.Table("custom_field_definitions").ID(d.ID).Exist(&CustomFieldDefinition{})
 	if err != nil {
@@ -731,6 +731,17 @@ func (d *CustomFieldDefinition) Delete(s *xorm.Session) error {
 	}
 	if !has {
 		return ErrCustomFieldNotFound{ID: d.ID}
+	}
+	// cascade-delete values (two-step: child rows via the value-id subquery, then values)
+	if _, err := s.Table("custom_field_value_options").
+		Where("custom_field_value_id IN (SELECT id FROM custom_field_values WHERE custom_field_definition_id = ?)", d.ID).
+		Delete(&CustomFieldValueOption{}); err != nil {
+		return fmt.Errorf("custom-fields: cascade-delete value options: %w", err)
+	}
+	if _, err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ?", d.ID).
+		Delete(&CustomFieldValue{}); err != nil {
+		return fmt.Errorf("custom-fields: cascade-delete values: %w", err)
 	}
 	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", d.ID).Delete(&CustomFieldOption{}); err != nil {
 		return fmt.Errorf("custom-fields: delete options: %w", err)
