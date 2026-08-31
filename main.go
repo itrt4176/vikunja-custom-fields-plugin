@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -165,6 +166,49 @@ func (ErrCustomFieldGlobalConflict) Error() string {
 	return "a field is either global (all projects) or assigned to specific projects, not both"
 }
 
+const (
+	ErrCodeCustomFieldValueInvalid       = 9010
+	ErrCodeCustomFieldValueEmpty         = 9011
+	ErrCodeCustomFieldOptionNotFound     = 9012
+	ErrCodeCustomFieldValueAlreadyExists = 9013
+	ErrCodeCustomFieldValueNotFound      = 9014
+	ErrCodeCustomFieldTaskNotFound       = 9015
+)
+
+type ErrCustomFieldValueInvalid struct{ Type, Detail string }
+
+func (e ErrCustomFieldValueInvalid) Error() string {
+	return fmt.Sprintf("invalid value for %s field: %s", e.Type, e.Detail)
+}
+
+type ErrCustomFieldValueEmpty struct{}
+
+func (ErrCustomFieldValueEmpty) Error() string { return "value for a required field must not be empty" }
+
+type ErrCustomFieldOptionNotFound struct{ Value string }
+
+func (e ErrCustomFieldOptionNotFound) Error() string {
+	return fmt.Sprintf("option value %q is not a valid option for this field", e.Value)
+}
+
+type ErrCustomFieldValueAlreadyExists struct{ FieldID, TaskID int64 }
+
+func (e ErrCustomFieldValueAlreadyExists) Error() string {
+	return fmt.Sprintf("custom field value already exists for field %d on task %d", e.FieldID, e.TaskID)
+}
+
+type ErrCustomFieldValueNotFound struct{ FieldID, TaskID int64 }
+
+func (e ErrCustomFieldValueNotFound) Error() string {
+	return fmt.Sprintf("custom field value not found for field %d on task %d", e.FieldID, e.TaskID)
+}
+
+type ErrCustomFieldTaskNotFound struct{ ID int64 }
+
+func (e ErrCustomFieldTaskNotFound) Error() string {
+	return fmt.Sprintf("task %d not found", e.ID)
+}
+
 // ── Validation (pure functions; Task 4). Tasks 7 and 8 call these before
 // writing a definition or its project assignments.
 
@@ -208,6 +252,173 @@ func validateDefinition(d *CustomFieldDefinition, options []CustomFieldOption) e
 		return ErrCustomFieldInvalidConstraint{Detail: "min must not exceed max"}
 	}
 	return nil
+}
+
+// validateValue coerces and validates a raw value against a field definition's type
+// and constraints. No DB access. For scalar types it returns (storageString, nil, nil);
+// for select-types it returns ("", nil, nil) — the option IDs are resolved separately by
+// resolveOptionIDs (which needs the options slice the same way this does, but is called
+// by the write handler, not here, to keep this pure). raw is the JSON-decoded value.
+func validateValue(def *CustomFieldDefinition, options []CustomFieldOption, raw interface{}) (string, []int64, error) {
+	switch def.Type {
+	case "text", "textarea", "url":
+		v, ok := raw.(string)
+		if !ok {
+			return "", nil, ErrCustomFieldValueInvalid{Type: def.Type, Detail: "must be a string"}
+		}
+		if def.FieldConfig.Required && strings.TrimSpace(v) == "" {
+			return "", nil, ErrCustomFieldValueEmpty{}
+		}
+		if def.Type == "url" {
+			u, err := url.Parse(v)
+			if err != nil || u.Scheme == "" {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "url", Detail: "must be a valid URL with a scheme"}
+			}
+		}
+		return v, nil, nil
+	case "integer":
+		switch n := raw.(type) {
+		case float64: // JSON numbers arrive as float64
+			i := int64(n)
+			if float64(i) != n {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "out of range"}
+			}
+			if def.FieldConfig.Min != nil && float64(i) < *def.FieldConfig.Min {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "below min"}
+			}
+			if def.FieldConfig.Max != nil && float64(i) > *def.FieldConfig.Max {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "above max"}
+			}
+			return strconv.FormatInt(i, 10), nil, nil
+		case string:
+			i, err := strconv.ParseInt(n, 10, 64)
+			if err != nil {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "not a valid integer"}
+			}
+			if def.FieldConfig.Min != nil && float64(i) < *def.FieldConfig.Min {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "below min"}
+			}
+			if def.FieldConfig.Max != nil && float64(i) > *def.FieldConfig.Max {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "above max"}
+			}
+			return strconv.FormatInt(i, 10), nil, nil
+		}
+		return "", nil, ErrCustomFieldValueInvalid{Type: "integer", Detail: "must be a number"}
+	case "decimal":
+		var f float64
+		switch n := raw.(type) {
+		case float64:
+			f = n
+		case string:
+			v, err := strconv.ParseFloat(n, 64)
+			if err != nil {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "decimal", Detail: "not a valid number"}
+			}
+			f = v
+		default:
+			return "", nil, ErrCustomFieldValueInvalid{Type: "decimal", Detail: "must be a number"}
+		}
+		if def.FieldConfig.Min != nil && f < *def.FieldConfig.Min {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "decimal", Detail: "below min"}
+		}
+		if def.FieldConfig.Max != nil && f > *def.FieldConfig.Max {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "decimal", Detail: "above max"}
+		}
+		return strconv.FormatFloat(f, 'f', -1, 64), nil, nil
+	case "date":
+		s, ok := raw.(string)
+		if !ok {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "date", Detail: "must be an ISO date string"}
+		}
+		if _, err := time.Parse("2006-01-02", s); err != nil {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "date", Detail: "must be YYYY-MM-DD"}
+		}
+		return s, nil, nil
+	case "datetime":
+		s, ok := raw.(string)
+		if !ok {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "datetime", Detail: "must be an RFC3339 string"}
+		}
+		if _, err := time.Parse(time.RFC3339, s); err != nil {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "datetime", Detail: "must be RFC3339"}
+		}
+		return s, nil, nil
+	case "checkbox":
+		switch v := raw.(type) {
+		case bool:
+			return strconv.FormatBool(v), nil, nil
+		case string:
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "checkbox", Detail: "must be a boolean"}
+			}
+			return strconv.FormatBool(b), nil, nil
+		}
+		return "", nil, ErrCustomFieldValueInvalid{Type: "checkbox", Detail: "must be a boolean"}
+	case "select", "multiselect":
+		// validate the option value string(s) are in the field's current options' values.
+		// returns no storage string — the handler calls resolveOptionIDs to get the IDs.
+		validValues := map[string]struct{}{}
+		for _, o := range options {
+			validValues[o.Value] = struct{}{}
+		}
+		if def.Type == "select" {
+			s, ok := raw.(string)
+			if !ok {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "select", Detail: "must be a string option value"}
+			}
+			if def.FieldConfig.Required && s == "" {
+				return "", nil, ErrCustomFieldValueEmpty{}
+			}
+			if s != "" {
+				if _, ok := validValues[s]; !ok {
+					return "", nil, ErrCustomFieldOptionNotFound{Value: s}
+				}
+			}
+			return s, nil, nil
+		}
+		// multiselect: raw is a []interface{} of strings (JSON array)
+		arr, ok := raw.([]interface{})
+		if !ok {
+			return "", nil, ErrCustomFieldValueInvalid{Type: "multiselect", Detail: "must be an array of option values"}
+		}
+		vals := make([]string, 0, len(arr))
+		for _, e := range arr {
+			s, ok := e.(string)
+			if !ok {
+				return "", nil, ErrCustomFieldValueInvalid{Type: "multiselect", Detail: "array elements must be strings"}
+			}
+			if _, ok := validValues[s]; !ok {
+				return "", nil, ErrCustomFieldOptionNotFound{Value: s}
+			}
+			vals = append(vals, s)
+		}
+		if def.FieldConfig.Required && len(vals) == 0 {
+			return "", nil, ErrCustomFieldValueEmpty{}
+		}
+		// join for a notional storage string (not actually stored for select-types, but
+		// return it for completeness; the handler uses resolveOptionIDs for the child rows)
+		return strings.Join(vals, "\x00"), nil, nil
+	}
+	return "", nil, ErrCustomFieldInvalidType{Type: def.Type}
+}
+
+// resolveOptionIDs maps option value strings to option IDs by matching the passed
+// options slice's Value field. Called by write handlers after validateValue succeeds.
+func resolveOptionIDs(options []CustomFieldOption, valueStrings []string) ([]int64, error) {
+	byValue := map[string]int64{}
+	for _, o := range options {
+		byValue[o.Value] = o.ID
+	}
+	ids := make([]int64, 0, len(valueStrings))
+	for _, v := range valueStrings {
+		id, ok := byValue[v]
+		if !ok {
+			return nil, ErrCustomFieldOptionNotFound{Value: v}
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // validateAssignment confirms each specific project exists. The global sentinel
