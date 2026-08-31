@@ -79,7 +79,7 @@ without slipping the final S7 ship date.
 - [x] **S1** — Plugin Foundation
 - [x] **S8** — Config Whitelist
 - [x] **S2** — Field Definition API
-- [ ] **S3** — Task Field Values API
+- [x] **S3** — Task Field Values API
 - [ ] **S5** — Custom Fields on Task Detail
 - [ ] **S7** — Build, Deploy & Document
 
