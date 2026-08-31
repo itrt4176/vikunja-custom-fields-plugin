@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -726,6 +727,29 @@ type definitionRequest struct {
 	ProjectIDs   []int64             `json:"project_ids"`
 }
 
+// valueItem is one entry of the bulk write body. R4: the bulk POST
+// /tasks/:task/custom-fields body is a BARE JSON array of these — not a
+// {"values": [...]} wrapper — so it is decoded directly with encoding/json.
+type valueItem struct {
+	CustomFieldDefinitionID int64       `json:"custom_field_definition_id"`
+	Value                   interface{} `json:"value"`
+}
+
+// singleValueRequest is the body of the per-field POST/PUT: {"value": ...}.
+type singleValueRequest struct {
+	Value interface{} `json:"value"`
+}
+
+// valueToMap builds the {value, field} entry for the read response. fieldMap is
+// the definition's metadata (built by S2's definitionToMap, reused). value is
+// the coerced native value, or nil if absent/invalid.
+func valueToMap(value interface{}, fieldMap map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"value": value,
+		"field": fieldMap,
+	}
+}
+
 // fieldConfigMap builds the field_config map with concrete float64 values
 // (dereferenced pointers) so c.JSON never has to marshal a yaegi-wrapped *float64.
 func fieldConfigMap(fc FieldConfig) map[string]interface{} {
@@ -817,6 +841,22 @@ func toHTTPError(err error) error {
 		return echo.NewHTTPError(http.StatusBadRequest, msg)
 	case strings.HasPrefix(msg, "a field is either global"):
 		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	// S3 value errors. R1: one unique prefix per case — yaegi evaluates only the
+	// first expression of a multi-expression case clause, so HasPrefix+Contains
+	// pairs would collide. Prefixes here are the Task 2 error messages; all are
+	// distinct from S2's "custom field definition ..." / "custom field name ...".
+	case strings.HasPrefix(msg, "invalid value for"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "value for a required field must not be empty"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "option value"):
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	case strings.HasPrefix(msg, "custom field value already exists"):
+		return echo.NewHTTPError(http.StatusConflict, msg)
+	case strings.HasPrefix(msg, "custom field value not found"):
+		return echo.NewHTTPError(http.StatusNotFound, msg)
+	case strings.HasPrefix(msg, "task ") && strings.Contains(msg, "not found"):
+		return echo.NewHTTPError(http.StatusNotFound, msg)
 	default:
 		return echo.NewHTTPError(http.StatusInternalServerError, msg)
 	}
@@ -996,6 +1036,488 @@ func deleteHandler(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// ── Value handlers (S3). Read: collection + per-field GET, shaped
+// {definition_id: {value, field}}. Write: bulk upsert (bare-array body, R4),
+// per-field create/update/delete sharing the writeValue helper.
+
+// fieldAppliesToProject mirrors S2's ReadAll project filter (NotificationProjectFilter
+// logic, not builder syntax): a field applies to a project if it has a
+// custom_field_projects row for that project OR the global sentinel
+// (project_id = 0). The OR is parenthesized inside a single Where — xorm's
+// Where/And chaining would emit the OR un-parenthesized, and SQL's precedence
+// would then detach the definition filter from the global branch.
+func fieldAppliesToProject(s *xorm.Session, defID, projectID int64) (bool, error) {
+	return s.Table("custom_field_projects").
+		Where("custom_field_definition_id = ? AND (project_id = ? OR project_id = 0)", defID, projectID).
+		Exist(&CustomFieldProject{})
+}
+
+// coerceReadValue returns the native JSON value for a stored string + field
+// type, or nil if the value can't be coerced (invalid → absent per the
+// read-path policy: a value that no longer parses reads as null, never 500).
+// Select-type values never reach this — readValuesForTask resolves them from
+// custom_field_value_options (the API exposes the option value string, not the
+// stored option id).
+func coerceReadValue(def *CustomFieldDefinition, stored string) interface{} {
+	switch def.Type {
+	case "integer":
+		i, err := strconv.ParseInt(stored, 10, 64)
+		if err != nil {
+			return nil
+		}
+		return i
+	case "decimal":
+		f, err := strconv.ParseFloat(stored, 64)
+		if err != nil {
+			return nil
+		}
+		return f
+	case "checkbox":
+		b, err := strconv.ParseBool(stored)
+		if err != nil {
+			return nil
+		}
+		return b
+	default:
+		if stored == "" {
+			return nil
+		}
+		return stored
+	}
+}
+
+// readValuesForTask fetches the task's values, filters by project assignment
+// (AC#4), coerces to native types, and returns the {definition_id: {value,
+// field}} map. Shared by the collection GET, the per-field GET, and the write
+// handlers' canonical re-read responses.
+func readValuesForTask(s *xorm.Session, taskID int64) (map[string]interface{}, error) {
+	t, err := models.GetTaskByIDSimple(s, taskID)
+	if err != nil {
+		return nil, ErrCustomFieldTaskNotFound{ID: taskID}
+	}
+	var values []CustomFieldValue
+	if err := s.Table("custom_field_values").Where("task_id = ?", taskID).Find(&values); err != nil {
+		return nil, fmt.Errorf("custom-fields: get values: %w", err)
+	}
+	out := map[string]interface{}{}
+	for _, v := range values {
+		// AC#4: the field must be assigned to the task's project.
+		applies, err := fieldAppliesToProject(s, v.CustomFieldDefinitionID, t.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("custom-fields: check field assignment: %w", err)
+		}
+		if !applies {
+			continue
+		}
+		// fetch the definition + options (field metadata + type coercion)
+		d := &CustomFieldDefinition{ID: v.CustomFieldDefinitionID}
+		def, opts, pids, err := d.ReadOne(s)
+		if err != nil {
+			// definition deleted while its value row remains (S2 delete doesn't
+			// cascade to values yet — Task 7 fixes that): skip the orphan. Other
+			// failures are real and abort. yaegi can't type-assert interpreted
+			// errors (see toHTTPError), so discriminate by message prefix.
+			if strings.HasPrefix(err.Error(), "custom field definition ") {
+				continue
+			}
+			return nil, err
+		}
+		fieldMap := definitionToMap(def, opts, pids)
+		var native interface{}
+		if isSelectLike(def.Type) {
+			// resolve the option value strings from the child table — the value
+			// row itself is empty for select-types; the option ids live here
+			var childRows []CustomFieldValueOption
+			if err := s.Table("custom_field_value_options").Where("custom_field_value_id = ?", v.ID).Find(&childRows); err != nil {
+				return nil, fmt.Errorf("custom-fields: get value options: %w", err)
+			}
+			if len(childRows) == 0 {
+				native = nil
+			} else {
+				optIDs := make([]int64, 0, len(childRows))
+				for _, c := range childRows {
+					optIDs = append(optIDs, c.CustomFieldOptionID)
+				}
+				valStrings := make([]string, 0, len(childRows))
+				for _, o := range opts {
+					for _, id := range optIDs {
+						if o.ID == id {
+							valStrings = append(valStrings, o.Value)
+						}
+					}
+				}
+				if def.Type == "select" {
+					if len(valStrings) > 0 {
+						native = valStrings[0]
+					} else {
+						native = nil
+					}
+				} else {
+					native = valStrings
+				}
+			}
+		} else {
+			native = coerceReadValue(def, v.Value)
+		}
+		out[strconv.FormatInt(v.CustomFieldDefinitionID, 10)] = valueToMap(native, fieldMap)
+	}
+	return out, nil
+}
+
+func listValuesHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID}
+	ok, err := v.CanRead(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no access to this task")
+	}
+	out, err := readValuesForTask(s, taskID)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+func readOneValueHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	fieldID, err := strconv.ParseInt(c.Param("field_id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid field id")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID, CustomFieldDefinitionID: fieldID}
+	ok, err := v.CanRead(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no access to this task")
+	}
+	// fetch this one value through the shared read path (same AC#4 filter +
+	// coercion), then pick the requested key — absent → 404
+	all, err := readValuesForTask(s, taskID)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	entry, present := all[strconv.FormatInt(fieldID, 10)]
+	if !present {
+		return echo.NewHTTPError(http.StatusNotFound, "value not found")
+	}
+	return c.JSON(http.StatusOK, entry)
+}
+
+// writeValue is the shared validate-then-write block for the three write
+// handlers (bulk upsert, per-field create, per-field update). It resolves the
+// task's project, enforces the AC#4 project-assignment check, validates the raw
+// value against the definition, replaces any existing value row (with its
+// select-type child rows), and inserts the new row (plus child rows for
+// select-types). It commits nothing — the caller owns the session and its
+// commit, so a multi-item batch stays atomic.
+//
+// Errors come back pre-translated (toHTTPError / echo.NewHTTPError) so handlers
+// return them as-is; only s.Commit() and the canonical re-read remain
+// handler-side.
+func writeValue(s *xorm.Session, taskID, fieldID int64, def *CustomFieldDefinition, opts []CustomFieldOption, raw interface{}) (*CustomFieldValue, error) {
+	// AC#4: the field must be assigned to the task's project to be writable.
+	t, err := models.GetTaskByIDSimple(s, taskID)
+	if err != nil {
+		return nil, toHTTPError(ErrCustomFieldTaskNotFound{ID: taskID})
+	}
+	applies, err := fieldAppliesToProject(s, fieldID, t.ProjectID)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("custom-fields: check field assignment: %w", err).Error())
+	}
+	if !applies {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "field is not assigned to this task's project")
+	}
+	storage, _, err := validateValue(def, opts, raw)
+	if err != nil {
+		return nil, toHTTPError(err)
+	}
+	// validateValue's second return is nil for select-types (its storage-string
+	// position is notional there), so re-extract the option value strings from
+	// raw for resolveOptionIDs.
+	var valStrings []string
+	if isSelectLike(def.Type) {
+		if def.Type == "select" {
+			if vs, ok := raw.(string); ok && vs != "" {
+				valStrings = []string{vs}
+			}
+		} else {
+			arr, ok := raw.([]interface{})
+			if !ok {
+				return nil, toHTTPError(ErrCustomFieldValueInvalid{Type: "multiselect", Detail: "must be an array of option values"})
+			}
+			valStrings = make([]string, 0, len(arr))
+			for _, e := range arr {
+				vs, ok := e.(string)
+				if !ok {
+					return nil, toHTTPError(ErrCustomFieldValueInvalid{Type: "multiselect", Detail: "array elements must be strings"})
+				}
+				valStrings = append(valStrings, vs)
+			}
+		}
+	}
+	// upsert: replace any existing value for (field, task) — child rows first,
+	// they reference the value row's id.
+	if _, err := s.Table("custom_field_value_options").
+		Where("custom_field_value_id IN (SELECT id FROM custom_field_values WHERE custom_field_definition_id = ? AND task_id = ?)", fieldID, taskID).
+		Delete(&CustomFieldValueOption{}); err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("custom-fields: clear value options: %w", err).Error())
+	}
+	if _, err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ? AND task_id = ?", fieldID, taskID).
+		Delete(&CustomFieldValue{}); err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("custom-fields: clear value: %w", err).Error())
+	}
+	val := &CustomFieldValue{CustomFieldDefinitionID: fieldID, TaskID: taskID}
+	if isSelectLike(def.Type) {
+		val.Value = "" // the option ids live in custom_field_value_options
+	} else {
+		val.Value = storage
+	}
+	if _, err := s.Table("custom_field_values").Insert(val); err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("custom-fields: insert value: %w", err).Error())
+	}
+	if isSelectLike(def.Type) && len(valStrings) > 0 {
+		optIDs, err := resolveOptionIDs(opts, valStrings)
+		if err != nil {
+			return nil, toHTTPError(err)
+		}
+		childRows := make([]CustomFieldValueOption, len(optIDs))
+		for i, id := range optIDs {
+			childRows[i] = CustomFieldValueOption{CustomFieldValueID: val.ID, CustomFieldOptionID: id}
+		}
+		if _, err := s.Table("custom_field_value_options").Insert(&childRows); err != nil {
+			return nil, echo.NewHTTPError(http.StatusInternalServerError, fmt.Errorf("custom-fields: insert value options: %w", err).Error())
+		}
+	}
+	return val, nil
+}
+
+// bulkUpsertHandler (POST /tasks/:task/custom-fields) writes one or more field
+// values in a single request. R4: the body is a BARE JSON array of valueItems,
+// not a wrapper object, so it is decoded directly with encoding/json — echo v5's
+// Bind is not robust for a bare array.
+func bulkUpsertHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	var items []valueItem
+	if err := json.NewDecoder(c.Request().Body).Decode(&items); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID}
+	ok, err := v.CanUpdate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no write access to this task")
+	}
+	for _, item := range items {
+		d := &CustomFieldDefinition{ID: item.CustomFieldDefinitionID}
+		def, opts, _, err := d.ReadOne(s)
+		if err != nil {
+			return toHTTPError(err)
+		}
+		if _, err := writeValue(s, taskID, item.CustomFieldDefinitionID, def, opts, item.Value); err != nil {
+			return err
+		}
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// re-read for the canonical response
+	out, err := readValuesForTask(s, taskID)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, out)
+}
+
+// createOneValueHandler (POST /tasks/:task/custom-fields/:field_id) creates one
+// field value. Create-only: 409 if a value already exists for (field, task).
+func createOneValueHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	fieldID, err := strconv.ParseInt(c.Param("field_id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid field id")
+	}
+	var req singleValueRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID, CustomFieldDefinitionID: fieldID}
+	ok, err := v.CanCreate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no write access to this task")
+	}
+	// create-only: 409 if a value already exists for (field, task)
+	exists, err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ? AND task_id = ?", fieldID, taskID).
+		Exist(&CustomFieldValue{})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if exists {
+		return toHTTPError(ErrCustomFieldValueAlreadyExists{FieldID: fieldID, TaskID: taskID})
+	}
+	d := &CustomFieldDefinition{ID: fieldID}
+	def, opts, _, err := d.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	if _, err := writeValue(s, taskID, fieldID, def, opts, req.Value); err != nil {
+		return err
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	all, err := readValuesForTask(s, taskID)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusCreated, all[strconv.FormatInt(fieldID, 10)])
+}
+
+// updateOneValueHandler (PUT /tasks/:task/custom-fields/:field_id) replaces one
+// field value. Replace-only: 404 if no value exists for (field, task).
+func updateOneValueHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	fieldID, err := strconv.ParseInt(c.Param("field_id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid field id")
+	}
+	var req singleValueRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID, CustomFieldDefinitionID: fieldID}
+	ok, err := v.CanUpdate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no write access to this task")
+	}
+	// replace-only: 404 if no value exists for (field, task)
+	exists, err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ? AND task_id = ?", fieldID, taskID).
+		Exist(&CustomFieldValue{})
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !exists {
+		return toHTTPError(ErrCustomFieldValueNotFound{FieldID: fieldID, TaskID: taskID})
+	}
+	d := &CustomFieldDefinition{ID: fieldID}
+	def, opts, _, err := d.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	if _, err := writeValue(s, taskID, fieldID, def, opts, req.Value); err != nil {
+		return err
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	all, err := readValuesForTask(s, taskID)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	return c.JSON(http.StatusOK, all[strconv.FormatInt(fieldID, 10)])
+}
+
+// deleteOneValueHandler (DELETE /tasks/:task/custom-fields/:field_id) removes a
+// field value and its select-type child rows.
+func deleteOneValueHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	taskID, err := strconv.ParseInt(c.Param("task"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid task id")
+	}
+	fieldID, err := strconv.ParseInt(c.Param("field_id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid field id")
+	}
+	s := db.NewSession()
+	defer s.Close()
+	v := &CustomFieldValue{TaskID: taskID, CustomFieldDefinitionID: fieldID}
+	ok, err := v.CanDelete(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "no write access to this task")
+	}
+	if _, err := s.Table("custom_field_value_options").
+		Where("custom_field_value_id IN (SELECT id FROM custom_field_values WHERE custom_field_definition_id = ? AND task_id = ?)", fieldID, taskID).
+		Delete(&CustomFieldValueOption{}); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if _, err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ? AND task_id = ?", fieldID, taskID).
+		Delete(&CustomFieldValue{}); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if err := s.Commit(); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 // CustomFieldsPlugin is the main plugin struct. All capabilities (tables, routes)
 // are methods added to this struct in later tasks.
 type CustomFieldsPlugin struct{}
@@ -1064,6 +1586,16 @@ func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
 	g.GET("/custom-fields/definitions/:id", readOneHandler)
 	g.PUT("/custom-fields/definitions/:id", updateHandler)
 	g.DELETE("/custom-fields/definitions/:id", deleteHandler)
+	// S3 field values. The group mounts at /api/v1/plugins and every plugin path
+	// carries the /custom-fields namespace itself (S2 convention), so the value
+	// resource is /api/v1/plugins/custom-fields/tasks/:task/custom-fields[/:field_id]
+	// — the native /api/v2/tasks/{task}/custom-fields shape under the plugin prefix.
+	g.GET("/custom-fields/tasks/:task/custom-fields", listValuesHandler)
+	g.POST("/custom-fields/tasks/:task/custom-fields", bulkUpsertHandler)
+	g.GET("/custom-fields/tasks/:task/custom-fields/:field_id", readOneValueHandler)
+	g.POST("/custom-fields/tasks/:task/custom-fields/:field_id", createOneValueHandler)
+	g.PUT("/custom-fields/tasks/:task/custom-fields/:field_id", updateOneValueHandler)
+	g.DELETE("/custom-fields/tasks/:task/custom-fields/:field_id", deleteOneValueHandler)
 }
 
 func healthHandler(c *echo.Context) error {
