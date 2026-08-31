@@ -50,14 +50,25 @@ func (CustomFieldDefinition) TableName() string { return "custom_field_definitio
 // adds the UNIQUE(field, task) constraint and query indexes.
 type CustomFieldValue struct {
 	ID                      int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
-	CustomFieldDefinitionID int64     `xorm:"bigint not null" json:"custom_field_definition_id"`
-	TaskID                  int64     `xorm:"bigint not null" json:"task_id"`
+	CustomFieldDefinitionID int64     `xorm:"bigint not null unique(field_task)" json:"custom_field_definition_id"`
+	TaskID                  int64     `xorm:"bigint not null unique(field_task) index" json:"task_id"`
 	Value                   string    `xorm:"text" json:"value"`
 	Created                 time.Time `xorm:"created not null" json:"-"`
 	Updated                 time.Time `xorm:"updated not null" json:"-"`
 }
 
 func (CustomFieldValue) TableName() string { return "custom_field_values" }
+
+// CustomFieldValueOption is one selected option of a select/multiselect value on a task.
+// The label_tasks shape: a real table with its own PK, FKs to the value and the option.
+type CustomFieldValueOption struct {
+	ID                  int64     `xorm:"bigint autoincr not null unique pk" json:"id"`
+	CustomFieldValueID  int64     `xorm:"bigint not null index" json:"custom_field_value_id"`
+	CustomFieldOptionID int64     `xorm:"bigint not null index" json:"custom_field_option_id"`
+	Created             time.Time `xorm:"created not null" json:"-"`
+}
+
+func (CustomFieldValueOption) TableName() string { return "custom_field_value_options" }
 
 // CustomFieldOption is one row of a select/multiselect field's option list.
 type CustomFieldOption struct {
@@ -779,6 +790,9 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 			if err := tx.Table("custom_field_values").Sync2(&CustomFieldValue{}); err != nil {
 				return fmt.Errorf("custom-fields: sync values: %w", err)
 			}
+			if err := tx.Table("custom_field_value_options").Sync2(&CustomFieldValueOption{}); err != nil {
+				return fmt.Errorf("custom-fields: sync value options: %w", err)
+			}
 			if err := tx.Table("custom_field_options").Sync2(&CustomFieldOption{}); err != nil {
 				return fmt.Errorf("custom-fields: sync options: %w", err)
 			}
@@ -788,8 +802,8 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 			return nil
 		},
 		Rollback: func(tx *xorm.Engine) error {
-			// Drop in dependency order: values + options + assignments reference definitions.
-			return tx.DropTables("custom_field_values", "custom_field_options", "custom_field_projects", "custom_field_definitions")
+			// Drop in dependency order: value-options reference values; values + options + assignments reference definitions.
+			return tx.DropTables("custom_field_value_options", "custom_field_values", "custom_field_options", "custom_field_projects", "custom_field_definitions")
 		},
 	}}
 }
