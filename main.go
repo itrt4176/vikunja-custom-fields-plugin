@@ -458,6 +458,41 @@ func (d *CustomFieldDefinition) CanDelete(s *xorm.Session, u *user.User) (bool, 
 	return IsManager(u.Username), nil
 }
 
+// Value access is gated on task-level permission, not the management whitelist:
+// a value is visible/writable exactly when its task is. These delegate to the
+// host's models.Task.CanRead/CanUpdate with the same *user.User (yaegi accepts
+// it in place of web.Auth). canWrite is the shared write gate (create/update/
+// delete all require task write access).
+
+func (v *CustomFieldValue) CanRead(s *xorm.Session, u *user.User) (bool, error) {
+	t := &models.Task{ID: v.TaskID}
+	ok, _, err := t.CanRead(s, u) // discard maxPermission (3-return → 2-return)
+	if err != nil {
+		// a not-found task means no access; surface as false, not 500
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "does not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return ok, nil
+}
+
+func (v *CustomFieldValue) canWrite(s *xorm.Session, u *user.User) (bool, error) {
+	t := &models.Task{ID: v.TaskID}
+	ok, err := t.CanUpdate(s, u)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "does not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return ok, nil
+}
+
+func (v *CustomFieldValue) CanCreate(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
+func (v *CustomFieldValue) CanUpdate(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
+func (v *CustomFieldValue) CanDelete(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
+
 // whitelist holds the lowercase usernames permitted to manage custom fields.
 // Populated once in Init() from Vikunja's config (customfields.whitelist,
 // overridable by the VIKUNJA_CUSTOMFIELDS_WHITELIST env var); read-only
