@@ -553,22 +553,54 @@ func resolveProjectIDs(projectIDs []int64) []int64 {
 	return projectIDs
 }
 
-// setOptions replaces a definition's option rows. delete-existing is a no-op on
-// Create (none exist yet); on Update it clears the old set before re-inserting.
-// Options are only written for select/multiselect.
+// setOptions reconciles a definition's option rows. Existing options are matched by Value
+// and updated in place (preserving their IDs — critical because custom_field_value_options
+// references option IDs); new options are inserted; removed options are deleted. The
+// delete-existing-then-reinsert-all of S2 would orphan all stored select values on any
+// option edit, even a reorder (spec: setOptions re-creation interaction).
 func setOptions(s *xorm.Session, defID int64, t string, options []CustomFieldOption) error {
-	if _, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldOption{}); err != nil {
-		return fmt.Errorf("custom-fields: clear options: %w", err)
+	// only for select/multiselect
+	if !isSelectLike(t) {
+		// non-select: ensure no option rows exist
+		_, err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", defID).Delete(&CustomFieldOption{})
+		return err
 	}
-	if !isSelectLike(t) || len(options) == 0 {
-		return nil
+	// fetch existing options keyed by value
+	var existing []CustomFieldOption
+	if err := s.Table("custom_field_options").Where("custom_field_definition_id = ?", defID).Find(&existing); err != nil {
+		return fmt.Errorf("custom-fields: get options for reconcile: %w", err)
 	}
+	existingByValue := map[string]*CustomFieldOption{}
+	for i := range existing {
+		existingByValue[existing[i].Value] = &existing[i]
+	}
+	seen := map[string]struct{}{}
 	for i := range options {
-		options[i].ID = 0 // don't let a client-supplied id reach Insert
-		options[i].CustomFieldDefinitionID = defID
+		opt := options[i]
+		opt.ID = 0 // don't trust a client-supplied id
+		opt.CustomFieldDefinitionID = defID
+		seen[opt.Value] = struct{}{}
+		if e, ok := existingByValue[opt.Value]; ok {
+			// update in place: preserve e.ID, update label + display_order
+			e.Label = opt.Label
+			e.DisplayOrder = opt.DisplayOrder
+			if _, err := s.Table("custom_field_options").ID(e.ID).Cols("label", "display_order").Update(e); err != nil {
+				return fmt.Errorf("custom-fields: update option: %w", err)
+			}
+		} else {
+			// new option: insert
+			if _, err := s.Table("custom_field_options").Insert(&opt); err != nil {
+				return fmt.Errorf("custom-fields: insert option: %w", err)
+			}
+		}
 	}
-	if _, err := s.Table("custom_field_options").Insert(&options); err != nil {
-		return fmt.Errorf("custom-fields: insert options: %w", err)
+	// delete options not in the new set
+	for _, e := range existing {
+		if _, ok := seen[e.Value]; !ok {
+			if _, err := s.Table("custom_field_options").ID(e.ID).Delete(&CustomFieldOption{}); err != nil {
+				return fmt.Errorf("custom-fields: delete removed option: %w", err)
+			}
+		}
 	}
 	return nil
 }
