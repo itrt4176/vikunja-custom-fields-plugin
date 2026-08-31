@@ -23,7 +23,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 
 - **Works without a license** — the UI is served by the plugin and whitelist-gated, never touching Vikunja's licensed admin feature.
 - **Centrally governed** — the UI is the whitelisted user's tool; it checks the whitelist (S8) before allowing changes.
-- **API-first, UI-second** — the UI is a consumer of the S2 API. It adds no new backend capabilities, only a browser interface to existing ones.
+- **API-first, UI-second** — the UI is a consumer of the S2 API. It adds no new backend capabilities beyond a definition-edit-impact query (AC#9): detecting whether a pending definition edit would invalidate existing values requires querying the values table (S3's table), so S9 adds that one query; all other UI functionality consumes existing S2 endpoints.
 - **Plugin as proving ground, not permanent home** — the UI is a temporary stand-in; the future epic is native integration.
 
 ## Dependencies
@@ -31,6 +31,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 - **Must come after:** S2 (Field Definition API), S8 (Config Whitelist)
 - **Must come before:** S7 (Build, Deploy & Document)
 - **Can run in parallel with:** S3 (Task Field Values API), S5 (Custom Fields on Task Detail)
+  > **Note:** the definition-edit-impact warning (AC#9) queries the values table S3 owns. S3 must land first for that feature; the rest of S9's management UI can proceed in parallel with S3.
 
 ## Acceptance Criteria
 
@@ -42,6 +43,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 6. Users not on the whitelist cannot access the management UI.
 7. Validation errors from the API are displayed inline on the form.
 8. The UI works without any licensed admin feature being enabled.
+9. When editing a field definition in a way that would invalidate existing stored values (e.g., removing select options that are in use, or changing a field's type), the UI warns the user with a count of affected values before saving.
 
 ## Scope
 
@@ -52,6 +54,7 @@ This is a **temporary** stand-in. It is served from a plugin route so it bypasse
 - Inline validation error display
 - Whitelist-gated access (via S8)
 - Browser-session authentication
+- Backend support for detecting definition edits that would invalidate existing values (a count query on the values table by `definition_id`, using the index S3 provides — the query is definitions-API-shaped but touches S3's values table)
 
 **Out of scope:**
 - Integration into Vikunja's native interface — future epic
