@@ -82,8 +82,8 @@ resource with its own CRUD endpoints, `xorm:"-"` on the task).
   `frontend/src/services/labelTask.ts` — `create: '/tasks/{taskId}/labels'`, `delete:
   '/tasks/{taskId}/labels/{labelId}'`. Both extend `AbstractService`
   (`frontend/src/services/abstractService.ts:44`), which substitutes `{param}` in path
-  templates (confirmed at `abstractService.ts:31`) and uses
-  `AuthenticatedHTTPFactory()` (`abstractService.ts:53`) whose baseURL is `/api/v1`
+  templates (`getRouteReplacements`/`getReplacedRoute`, `abstractService.ts:159-190`) and uses
+  `AuthenticatedHTTPFactory()` (called in the constructor, `abstractService.ts:73`) whose baseURL is `/api/v1`
   (`frontend/src/helpers/fetcher.ts:9-26`, `getApiBaseUrl` → `window.API_URL`, which
   defaults to `/api/v1`).
 - **Store actions:** `frontend/src/stores/tasks.ts` — `addAssignee` (`:233`),
@@ -192,8 +192,9 @@ it independently).
 ## Architecture & file layout (vikunja frontend)
 
 S5 mirrors the assignee/label precedent. New files follow the existing
-model/service/component/store split; the only existing file modified is
-`TaskDetailView.vue` (to add the section) and `en.json` (structural strings).
+model/service/component/store split; existing files modified are
+`TaskDetailView.vue` (add the section), `Datepicker.vue` + `DatepickerInline.vue` (the
+`withTime` prop — fork core), and `en.json` (structural strings).
 
 ```
 frontend/src/
@@ -202,9 +203,12 @@ frontend/src/
 ├── models/
 │   └── customField.ts                  NEW — CustomFieldModel (parses field.options, field_config; value as native type)
 ├── services/
-│   └── customField.ts                  NEW — CustomFieldService extends AbstractService; paths under the plugin prefix
+│   └── customField.ts                  NEW — CustomFieldService (bulkUpsert bypasses the snake_case interceptor; see service layer)
 ├── stores/
 │   └── (useTaskStore, extended)         MODIFIED — loadCustomFields/saveCustomFieldValue/clearCustomFieldValue actions
+├── components/input/
+│   ├── Datepicker.vue                  MODIFIED (fork core) — withTime prop (default true), passed to DatepickerInline
+│   └── DatepickerInline.vue            MODIFIED (fork core) — withTime prop → enableTime/dateFormat; formatDateToFlatpickrString; setDate
 ├── components/tasks/partials/
 │   └── CustomFields.vue                NEW — the data-driven section; one row per map entry, switch on field.type
 ├── views/tasks/
@@ -259,31 +263,71 @@ export interface ICustomFieldValue {
 export type CustomFieldValuesMap = Record<string, ICustomFieldValue>
 ```
 
-### `services/customField.ts` (NEW)
+### `services/customField.ts` (NEW) — the bulk-POST path follows the `bulkCreate` precedent
 
-`CustomFieldService extends AbstractService` with paths under the plugin route prefix
-(base `/api/v1`, confirmed `fetcher.ts:9-26`):
+The service must send the bulk upsert as a **bare-array POST**, which `AbstractService`'s
+default `create`/`update` plumbing does not do safely. Two verified problems with the
+default path (`abstractService.ts`, read this session):
+
+1. **Verb mismatch.** `create()` sends **PUT** (`abstractService.ts:390`,
+   `this.http.put(finalUrl, model)`); the plugin registers the bulk upsert on **POST only**
+   (`main.go:1679`, `g.POST("/custom-fields/tasks/:task/custom-fields",
+   bulkUpsertHandler)` — no PUT route on the collection). Using `create:` → PUT to a
+   POST-only route → no match.
+2. **Array mangling.** The request interceptor calls `objectToSnakeCase(config.data)`
+   (`abstractService.ts:86-92`) for both the 'put' and 'post' paths. `objectToSnakeCase`
+   (`frontend/src/helpers/case.ts:45`) iterates `Object.keys(object)` — on a bare array
+   `[{…},{…}]` that yields `["0","1",…]`, producing `{"0":{…},"1":{…}}`, not an array. The
+   plugin decodes the body as `[]valueItem` (`json.NewDecoder(...).Decode(&items)`,
+   `main.go:1381`) and would 400 on the object. (The array-element branch in
+   `objectToSnakeCase` does map over arrays correctly, but it is only reached for *values*
+   of object keys, not for a top-level array argument.)
+
+`TaskService` works around both problems for its own `bulkCreate` (`task.ts:180`) by using
+a **fresh `AuthenticatedHTTPFactory().post(...)`** that bypasses the shared interceptors
+entirely (`task.ts:211`), and by setting `autoTransformBeforePost() → false` (`task.ts:48`).
+`CustomFieldService` mirrors that precedent:
 
 ```ts
-export default class CustomFieldService extends AbstractService {
+import {AuthenticatedHTTPFactory} from '@/helpers/fetcher'
+import AbstractService from '@/services/abstractService'
+
+export default class CustomFieldService extends AbstractService<CustomFieldValueItem> {
 	constructor() {
 		super({
-			get: '/plugins/custom-fields/tasks/{taskId}/custom-fields',       // GET → the map
-			create: '/plugins/custom-fields/tasks/{taskId}/custom-fields',    // POST (bulk upsert, bare array)
-			delete: '/plugins/custom-fields/tasks/{taskId}/custom-fields/{fieldId}',  // DELETE one value
+			// get's route param is {taskId} — the call must pass {taskId}, not {id}
+			// (getRouteReplacements reads parameters['taskId']; abstractService.ts:159-184).
+			get: '/plugins/custom-fields/tasks/{taskId}/custom-fields',
+			delete: '/plugins/custom-fields/tasks/{taskId}/custom-fields/{fieldId}',
 		})
 	}
-	// The bulk POST body is a bare array [{custom_field_definition_id, value}, …],
-	// not a {values: [...]} wrapper (S3 §Write request shapes, verified against
-	// writeValue at main.go:1289). The service sends the array directly.
+
+	// The bulk upsert is a bare-array POST — NOT create (PUT) and NOT the default
+	// update (which runs the objectToSnakeCase interceptor on the body). Mirror
+	// TaskService.bulkCreate: a direct AuthenticatedHTTPFactory().post() bypasses
+	// the shared interceptors, so the bare-array body is sent unchanged.
+	async bulkUpsert(taskId: number, items: CustomFieldValueItem[]): Promise<CustomFieldValuesMap> {
+		const {data} = await AuthenticatedHTTPFactory().post(
+			`/api/v1/plugins/custom-fields/tasks/${taskId}/custom-fields`,
+			items, // bare array — the plugin decodes []valueItem
+		)
+		return data as CustomFieldValuesMap // bulkUpsertHandler returns readValuesForTask (the whole map)
+	}
 }
 ```
 
-**Implementation point to verify (not load-bearing for the design):** `AbstractService`'s
-`create`/`update` methods may transform the body via `processModel`/`autoTransformBeforePost`
-(seen in `task.ts`, which disables it). The bulk POST's bare-array body may need to bypass
-that transform — same class of detail `TaskService` already handles. Resolved in
-implementation by reading `abstractService.ts`'s `create` body handling.
+**The GET and DELETE use the default `AbstractService` plumbing** (they take no body, so the
+snake_case interceptor is not reached): `get({taskId})` and `delete({taskId, fieldId})`. The
+**route param is `{taskId}`**, so the call passes `{taskId}`, not `{id}` — verified against
+`getRouteReplacements` (`abstractService.ts:159`, `parameters[parameter]` where
+`parameter` is the `{taskId}` captured group). Passing `{id: taskId}` → no `taskId` key →
+route `…/tasks/undefined/custom-fields` → `strconv.ParseInt` 400 (`main.go:1221`).
+
+**The bulk POST returns the full map** — `bulkUpsertHandler` ends with
+`readValuesForTask(s, taskID)` (`main.go`), so the store action **replaces the entire
+`customFieldValues[taskId]`** from the response, not a single field (see The store & data
+flow). The per-field `POST`/`PUT`/`DELETE` remain available to external API consumers (S9
+management UI, API clients) but the modal's save path uses `bulkUpsert` only.
 
 ## The store & data flow (native-first, then the plugin/fork approximation)
 
@@ -302,12 +346,13 @@ be a single `taskService.get` that already carries `customFields`.
 The native task `GET` cannot be augmented under yaegi (S3 AC#1, settled against
 `pkg/web/handler/read_one.go:33` and `pkg/routes/api/v2/tasks.go:107-131`). So:
 
-1. **Separate fetch.** `loadCustomFields(taskId)` calls `customFieldsService.get({id:
-   taskId})` → stashes the map in a `customFieldValues: Ref<Record<ITask['id'],
-   CustomFieldValuesMap>>` (keyed by taskId, analogous to how `tasks` is keyed by id at
-   `stores/tasks.ts:139`). Called in `TaskDetailView`'s `watch(taskId)` **alongside**
-   `taskService.get(...)`. This is the "extra round trip" S3's AC#1 amendment budgeted;
-   it is frontend↔backend, invisible to the end user.
+1. **Separate fetch.** `loadCustomFields(taskId)` calls `customFieldsService.get({taskId})`
+   (the route param is `{taskId}`, so the model is `{taskId}`, not `{id}` — see
+   `services/customField.ts`) → stashes the returned map in a `customFieldValues:
+   Ref<Record<ITask['id'], CustomFieldValuesMap>>` (keyed by taskId, analogous to how
+   `tasks` is keyed by id at `stores/tasks.ts:139`). Called in `TaskDetailView`'s
+   `watch(taskId)` **alongside** `taskService.get(...)`. This is the "extra round trip"
+   S3's AC#1 amendment budgeted; it is frontend↔backend, invisible to the end user.
 
 2. **No kanban sync (the one forced divergence).** `addAssignee`/`removeLabel` sync the
    kanban copy because `assignees`/`labels` *are* fields on the kanban `ITask`
@@ -319,28 +364,37 @@ The native task `GET` cannot be augmented under yaegi (S3 AC#1, settled against
    `customFieldValues` ref collapses into `task.customFields`.
 
 3. **Save (immediate commit — the user's decision).** `saveCustomFieldValue({taskId,
-   fieldId, value})` → upsert `POST [{custom_field_definition_id: fieldId, value}]` (one
-   item; the bulk upsert handles create+update, sidestepping the per-field `POST`-409 /
-   `PUT`-404 dance) → on success, update `customFieldValues[taskId][fieldId].value`. This
-   mirrors `addAssignee`'s "HTTP + update local" shape and the native-field
-   `@update:modelValue="saveTask()"` immediate-commit pattern. The bulk `POST` is the
-   "save these values" operation; the per-field `POST`/`PUT`/`DELETE` remain available to
-   external API consumers (S9 management UI, API clients) but are not the modal's save
-   path.
+   fieldId, value})` → `customFieldsService.bulkUpsert(taskId, [{custom_field_definition_id:
+   fieldId, value}])` (one item; the bulk upsert handles create+update, sidestepping the
+   per-field `POST`-409 / `PUT`-404 dance) → **on success, replace the entire
+   `customFieldValues[taskId]`** with the response (the bulk POST returns
+   `readValuesForTask` — the whole map, not the single value; verified at
+   `bulkUpsertHandler` in `main.go`). This mirrors `addAssignee`'s "HTTP + update local"
+   shape and the native-field `@update:modelValue="saveTask()"` immediate-commit pattern.
+   The per-field `POST`/`PUT`/`DELETE` remain available to external API consumers (S9
+   management UI, API clients) but are not the modal's save path.
 
 4. **Clear (the user's decision).** `clearCustomFieldValue({taskId, fieldId})` →
-   per-field `DELETE /.../custom-fields/{fieldId}` → remove the key from
-   `customFieldValues[taskId]`. Mirrors `removeAssignee` (`stores/tasks.ts:274`). The
-   row is gone; the next read returns `value: null`. (Rejected alternative: upsert
-   `null` via the bulk POST — leaves a null-valued row instead of removing it; `DELETE`
-   is cleaner and matches the endpoint S3 already exposes.)
+   per-field `DELETE /.../custom-fields/{fieldId}` → on success, remove the key from
+   `customFieldValues[taskId]` (or reload — the row is gone either way). Mirrors
+   `removeAssignee` (`stores/tasks.ts:274`). The row is gone; the next read returns
+   `value: null`. **The "upsert `null`" alternative is not viable, not merely less clean:**
+   `writeValue` → `validateValue` rejects a `nil`/`null` raw value for every type (the
+   validation expects a string/number/bool/array, not null; `main.go`'s `validateValue`) →
+   400. `DELETE` is the only working clear path. (A `null` value could only be stored by
+   writing the empty string for a non-required field — a different semantics, "set to
+   empty," not "unset.")
 
-5. **Discard on navigate (AC#4).** Under immediate commit, an *in-progress* text edit
-   (typed but not blurred) is local to the input; navigating away discards it because the
-   upsert never fired. Discrete edits (select/date/checkbox) commit immediately on change,
-   so there is nothing to discard. This satisfies AC#4 ("changing a value and navigating
-   away without saving discards the change") and AC#7 ("same interaction patterns as
-   native fields") — native fields auto-save on change and have no modal-level Save/Cancel.
+5. **Discard on navigate (AC#4).** Under immediate commit, an *in-progress* text/number
+   edit (typed but not committed) is local to the input; navigating away discards it
+   because the upsert never fired. Discrete edits (select/date/checkbox) commit immediately
+   on change, so there is nothing to discard. **The commit event is type-specific, not
+   uniformly "blur"** — see the Field-type → input table: text/number/url commit on blur
+   (via a local-ref + `@blur` handler, because `FormInput` emits `update:modelValue`
+   per-keystroke), select/multiselect commit on select/remove, date/datetime commit on
+   `closeOnChange`, checkbox on toggle. This satisfies AC#4 and AC#7 ("same interaction
+   patterns as native fields" — native fields auto-save on change with no modal-level
+   Save/Cancel).
 
 6. **Optimistic vs on-success.** Update the store on success, not optimistically — the
    input holds the local value until commit, then snaps to the confirmed value. Avoids
@@ -352,31 +406,98 @@ The native task `GET` cannot be augmented under yaegi (S3 AC#1, settled against
 Iterates `taskStore.customFieldValues[taskId]` (sorted by `field.display_order`), one
 row per entry, each in the same `div.column` + `.detail-title` + `CustomTransition`
 rhythm as Priority/Due Date. Each row `switch`es on `field.type` to pick the input
-component (§Field-type → input map), binds the input to `entry.value`, and on commit
-calls `taskStore.saveCustomFieldValue` / `clearCustomFieldValue`. `:disabled="!canWrite ||
+component (§Field-type → input map) and calls `taskStore.saveCustomFieldValue` /
+`clearCustomFieldValue` on the type-specific commit event. `:disabled="!canWrite ||
 field.field_config.is_api_only"`. No per-type hardcoded files — the type set is runtime
 data from the definition.
 
-## Field-type → input mapping (data-driven, one code path)
+**The commit wiring is type-specific (verified against the components' actual
+emit/handlers):**
+
+- **`FormInput`-based types (text/integer/decimal/url)** emit `update:modelValue` on every
+  keystroke (`FormInput.vue` `@input="handleInput"` → `emit('update:modelValue', …)`). To
+  commit on **blur** (not per-keystroke), `CustomFields.vue` holds a **local ref** per
+  field, binds it with `v-model` to the input, and commits the ref via `@blur` →
+  `saveCustomFieldValue`. `FormInput` exposes `focus()` + a value getter
+  (`defineExpose`, `FormInput.vue`), so the parent can hold a local ref and commit on
+  blur. This is the blur-commit mechanism AC#4 rests on; it is a *new* pattern for the
+  modal (no native field uses `FormInput` — they are all `PrioritySelect`/
+  `PercentDoneSelect`/`Datepicker`/`EditAssignees`/`EditLabels`), so it is documented as a
+  CustomFields-local pattern, not "the same as native fields."
+- **`Datepicker`** emits `closeOnChange` (and `update:modelValue` with a `Date`,
+  `Datepicker.vue:76,103`) — commit on `@closeOnChange` (the event `TaskDetailView`
+  already uses for dueDate/startDate/endDate, `TaskDetailView.vue:138`). The emitted value
+  is a `Date` object, not a string — `CustomFields.vue` formats it to the type's wire
+  format on commit (date-only → `YYYY-MM-DD`; datetime → RFC3339). See the `withTime`
+  prop below.
+- **`Multiselect`** binds/emits the **whole selected object**, not the value string
+  (`Multiselect.vue` `select()` sets `internalValue.value = object` and emits it).
+  `CustomFields.vue` passes `field.options` as `searchResults` (the options are the
+  searchable entries) and extracts `.value` from the selected object in `@select` /
+  `@remove` → `saveCustomFieldValue`/`clearCustomFieldValue` with the **option value
+  string** (for `select`) or the array of value strings (for `multiselect`). The
+  `#tag`/`#searchResult` slots display the option's `label`; the stored identity is the
+  value string.
+- **`FancyCheckbox`** toggles → commit on `@update:modelValue`.
+
+## Field-type → input mapping (data-driven, reconciled with the components' real behavior)
 
 | `field.type` | component | bound value | commit event | notes |
 |---|---|---|---|---|
-| `text` | `FormInput` | `string` | blur | |
-| `textarea` | `AsyncEditor` (TipTap — the Description editor) | `string` | blur | matches the Description field's editor |
-| `integer` | `FormInput` (`type=number`, `step=1`) | `number` | blur | `min`/`max` from `field_config` |
-| `decimal` | `FormInput` (`type=number`, `step=any`) | `number` | blur | `min`/`max` from `field_config` |
-| `date` | `Datepicker` | ISO `YYYY-MM-DD` | change | |
-| `datetime` | `Datepicker` (with time) | RFC3339 | change | |
-| `select` | `Multiselect` (`:multiple=false`, `:creatable=false`) | option value `string` | select | options from `field.options`; `:multiple` switches single vs multi in one component |
-| `multiselect` | `Multiselect` (`:multiple=true`, `:creatable=false`) | `string[]` of option values | add/remove | same component, `:multiple` flag |
-| `checkbox` | `FancyCheckbox` | `boolean` | toggle | |
-| `url` | `FormInput` (`type=url`) | URL string | blur | no dedicated URL component — `FormInput` is the precedent |
+| `text` | `FormInput` | local ref `string` | `@blur` | local ref + `@blur` (FormInput emits per-keystroke); commit the ref |
+| `textarea` | `AsyncEditor` (TipTap) | local ref `string` | `@blur` | **stores HTML, not plain text** — the value is rich-text markup; the `textarea` type name is multi-line text but the stored value is HTML (see Field-type notes) |
+| `integer` | `FormInput` (`type=number`, `step=1`) | local ref `number` | `@blur` | `min`/`max` from `field_config`; commit the ref |
+| `decimal` | `FormInput` (`type=number`, `step=any`) | local ref `number` | `@blur` | `min`/`max` from `field_config`; commit the ref |
+| `date` | `Datepicker` (`:withTime=false`) | `Date` (emitted) → format to `YYYY-MM-DD` on commit | `@closeOnChange` | **`withTime` prop (NEW, fork core)** — see Date-only rendering below |
+| `datetime` | `Datepicker` (`:withTime=true`, default) | `Date` → format to RFC3339 on commit | `@closeOnChange` | the existing time-on behavior |
+| `select` | `Multiselect` (`:multiple=false`, `:creatable=false`) | whole object → extract `.value` | `@select` / `@remove` | `searchResults` = `field.options`; store the option value string |
+| `multiselect` | `Multiselect` (`:multiple=true`, `:creatable=false`) | `string[]` of option values | `@select` / `@remove` | same component, `:multiple` flag; extract `.value` per entry |
+| `checkbox` | `FancyCheckbox` | `boolean` | `@update:modelValue` (toggle) | |
+| `url` | `FormInput` (`type=url`) | local ref `string` | `@blur` | local ref + `@blur`; no dedicated URL component |
 | any `is_api_only` | the type's component, `:disabled` | display-only | — | the value is shown, the input is not editable (AC#5) |
 
 **`value: null`** renders as an empty input (no synthesized default — S3's no-default-on-read
 policy; `field_config.default` is metadata the consumer may optionally use, not a
 server-side fallback). `Multiselect` for both single and multi (the user's decision) keeps
 one code path, matching how `EditAssignees`/`EditLabels` both wrap `Multiselect`.
+
+### Date-only rendering — `withTime` prop on `Datepicker` (NEW, fork core; the user's decision)
+
+The existing `Datepicker` (`Datepicker.vue`) wraps `DatepickerInline.vue`, which hardcodes
+`enableTime: true` + `dateFormat: 'Y-m-d H:i'` (`DatepickerInline.vue:124,129`) and emits a
+`Date` (`:217`). There is **no date-only mode**. A `date`-type field rendered with the
+time-on `Datepicker` would show a time picker the user shouldn't use, and the emitted
+`Date` formatted as RFC3339 would be rejected by the API's
+`time.Parse("2006-01-02", …)` (`main.go`'s date validation). A native `<input type=date>` was
+considered and rejected — it would be the only browser-native date control in the app (every
+Vikunja date field uses `Datepicker`), "sticking out like a sore thumb."
+
+**Add a `withTime` prop (default `true`) to `Datepicker` + `DatepickerInline`, threaded
+into `flatPickerConfig`** (`enableTime: props.withTime`, `dateFormat: props.withTime ?
+'Y-m-d H:i' : 'Y-m-d'`), `formatDateToFlatpickrString` (drop the time part when
+`!withTime`), and `setDate` (skip `getDateWithTime` when date-only). The shortcut buttons
+(today/tomorrow/etc.) are date-only concepts and work unchanged. `CustomFields.vue` passes
+`:withTime=false` for `date`, default (`true`) for `datetime`.
+
+**Upstream-acceptable because it generalizes rather than forks:** every existing call site
+(dueDate/startDate/endDate) is unchanged (`withTime` defaults to `true`); the prop adds
+date-only capability to the component the codebase already uses for every date field; it is
+backwards-compatible by construction. This is the kind of change that upstreams as a single
+self-contained PR (ship the prop; native custom fields use it). Recorded as a **fork-core
+touch** — `Datepicker.vue` + `DatepickerInline.vue` are modified in the fork, not the plugin.
+
+### Field-type notes (precision)
+
+- **`textarea` stores HTML, not plain text.** `AsyncEditor` is the TipTap rich-text editor
+  (the Description field's editor); its value is HTML markup, stored in a `text` column and
+  validated as a plain string (`main.go`). The `textarea` type name suggests multi-line
+  plain text, but the rendered value is rich text — a UX nuance to confirm during
+  implementation (plain `<textarea>` vs TipTap). If plain multi-line text is wanted, a
+  native `<textarea>` (not `AsyncEditor`) is the match; if rich text is acceptable, `AsyncEditor`
+  is the match. Left as an implementation decision, flagged here so it is not assumed away.
+- **Clearing is `DELETE`-only.** Upserting `null` is rejected by `validateValue` for every
+  type (null is not a string/number/bool/array) → 400. `DELETE` is the only working clear
+  path (see The store & data flow #4).
 
 ## When the section shows (AC#6)
 
