@@ -1133,34 +1133,63 @@ func coerceReadValue(def *CustomFieldDefinition, stored string) interface{} {
 	}
 }
 
-// readValuesForTask fetches the task's values, filters by project assignment
-// (AC#4), coerces to native types, and returns the {definition_id: {value,
-// field}} map. Shared by the collection GET, the per-field GET, and the write
-// handlers' canonical re-read responses.
+// resolveSelectValue maps a select-type value row's option ids (stored in
+// custom_field_value_options) to the option value strings the API exposes —
+// the value row itself is empty for select-types, so the child table is the
+// source of truth. Returns nil for a value row with no child rows (nil-on-empty
+// is the established read-path behavior).
+func resolveSelectValue(s *xorm.Session, valueID int64, def *CustomFieldDefinition, opts []CustomFieldOption) (interface{}, error) {
+	var childRows []CustomFieldValueOption
+	if err := s.Table("custom_field_value_options").Where("custom_field_value_id = ?", valueID).Find(&childRows); err != nil {
+		return nil, fmt.Errorf("custom-fields: get value options: %w", err)
+	}
+	if len(childRows) == 0 {
+		return nil, nil
+	}
+	optIDs := make([]int64, 0, len(childRows))
+	for _, c := range childRows {
+		optIDs = append(optIDs, c.CustomFieldOptionID)
+	}
+	valStrings := make([]string, 0, len(childRows))
+	for _, o := range opts {
+		for _, id := range optIDs {
+			if o.ID == id {
+				valStrings = append(valStrings, o.Value)
+			}
+		}
+	}
+	if def.Type == "select" {
+		if len(valStrings) > 0 {
+			return valStrings[0], nil
+		}
+		return nil, nil
+	}
+	return valStrings, nil
+}
+
+// readValuesForTask returns the {definition_id: {value, field}} map for the
+// task's project-ASSIGNED definitions — not per value row. A field assigned to
+// the project but with no value row appears with value: null (the S3 read-path
+// policy: assigned-but-unset fields are present; only unassigned fields are
+// absent), as does a stored value that fails coercion. Shared by the collection
+// GET, the per-field GET, and the write handlers' canonical re-read responses.
 func readValuesForTask(s *xorm.Session, taskID int64) (map[string]interface{}, error) {
 	t, err := models.GetTaskByIDSimple(s, taskID)
 	if err != nil {
 		return nil, ErrCustomFieldTaskNotFound{ID: taskID}
 	}
-	var values []CustomFieldValue
-	if err := s.Table("custom_field_values").Where("task_id = ?", taskID).Find(&values); err != nil {
-		return nil, fmt.Errorf("custom-fields: get values: %w", err)
+	// ReadAll applies the AC#4 project filter itself (project_id = pid OR the
+	// global sentinel), ordered by display_order.
+	defs, err := ReadAll(s, t.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("custom-fields: list definitions for values: %w", err)
 	}
 	out := map[string]interface{}{}
-	for _, v := range values {
-		// AC#4: the field must be assigned to the task's project.
-		applies, err := fieldAppliesToProject(s, v.CustomFieldDefinitionID, t.ProjectID)
-		if err != nil {
-			return nil, fmt.Errorf("custom-fields: check field assignment: %w", err)
-		}
-		if !applies {
-			continue
-		}
-		// fetch the definition + options (field metadata + type coercion)
-		d := &CustomFieldDefinition{ID: v.CustomFieldDefinitionID}
+	for i := range defs {
+		d := &defs[i]
 		def, opts, pids, err := d.ReadOne(s)
 		if err != nil {
-			// definition deleted while its value row remains: skip the orphan.
+			// definition deleted while this loop runs: skip the orphan.
 			// Task 7's definition delete cascades values synchronously, so this
 			// skip is purely defensive — reachable only via a path that bypassed
 			// the cascade, or a race. Other failures are real and abort. yaegi
@@ -1172,43 +1201,26 @@ func readValuesForTask(s *xorm.Session, taskID int64) (map[string]interface{}, e
 			return nil, err
 		}
 		fieldMap := definitionToMap(def, opts, pids)
+		var v CustomFieldValue
+		has, err := s.Table("custom_field_values").
+			Where("custom_field_definition_id = ? AND task_id = ?", def.ID, taskID).
+			Get(&v)
+		if err != nil {
+			return nil, fmt.Errorf("custom-fields: get value for field %d: %w", def.ID, err)
+		}
 		var native interface{}
-		if isSelectLike(def.Type) {
-			// resolve the option value strings from the child table — the value
-			// row itself is empty for select-types; the option ids live here
-			var childRows []CustomFieldValueOption
-			if err := s.Table("custom_field_value_options").Where("custom_field_value_id = ?", v.ID).Find(&childRows); err != nil {
-				return nil, fmt.Errorf("custom-fields: get value options: %w", err)
+		switch {
+		case !has:
+			// no value row → the assigned-but-unset case: present, but null
+		case isSelectLike(def.Type):
+			native, err = resolveSelectValue(s, v.ID, def, opts)
+			if err != nil {
+				return nil, err
 			}
-			if len(childRows) == 0 {
-				native = nil
-			} else {
-				optIDs := make([]int64, 0, len(childRows))
-				for _, c := range childRows {
-					optIDs = append(optIDs, c.CustomFieldOptionID)
-				}
-				valStrings := make([]string, 0, len(childRows))
-				for _, o := range opts {
-					for _, id := range optIDs {
-						if o.ID == id {
-							valStrings = append(valStrings, o.Value)
-						}
-					}
-				}
-				if def.Type == "select" {
-					if len(valStrings) > 0 {
-						native = valStrings[0]
-					} else {
-						native = nil
-					}
-				} else {
-					native = valStrings
-				}
-			}
-		} else {
+		default:
 			native = coerceReadValue(def, v.Value)
 		}
-		out[strconv.FormatInt(v.CustomFieldDefinitionID, 10)] = valueToMap(native, fieldMap)
+		out[strconv.FormatInt(def.ID, 10)] = valueToMap(native, fieldMap)
 	}
 	return out, nil
 }
