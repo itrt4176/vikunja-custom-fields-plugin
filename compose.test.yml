@@ -1,6 +1,6 @@
 services:
   vikunja:
-    image: vikunja/vikunja:2.6
+    image: ghcr.io/itrt4176/vikunja:2.6
     ports:
       - "127.0.0.1:4176:3456"
     volumes:
