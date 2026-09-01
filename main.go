@@ -101,7 +101,9 @@ func (CustomFieldProject) TableName() string { return "custom_field_projects" }
 
 // ── Errors (plugin-local 9000s range; web.HTTPError is unavailable to yaegi,
 // so handlers translate these to echo.NewHTTPError(code, message). Upstream
-// conversion: replace echo.NewHTTPError with HTTPError()/ErrCode per custom-errors.md.)
+// conversion: replace echo.NewHTTPError with HTTPError()/ErrCode per the host
+// convention in pkg/models/error.go (doc: https://vikunja.io/docs/custom-errors/).
+// The ErrCode* consts below are pre-staged for that conversion.)
 
 const (
 	ErrCodeCustomFieldNameEmpty           = 9001
