@@ -52,10 +52,14 @@ and an action-button column (right, one-third).
 
 Every native field is a `div.column` in the `.details` grid, guarded by
 `v-if="activeFields.<field>"`, with a `.detail-title` (icon + i18n string) + the input
-component bound `v-model` + `@update:modelValue="saveTask()"`. `saveTask()` calls
-`taskStore.update(currentTask)` (`stores/tasks.ts:185`), which calls the task service's
-`update` and syncs the kanban store. **Native fields auto-save on change — there is no
-modal-level Save/Cancel; every field commit persists immediately.**
+component bound `v-model` + a commit handler that calls `saveTask()` →
+`taskStore.update(currentTask)` (`stores/tasks.ts:185`). **The commit event varies by
+component** — `@update:modelValue="saveTask()"` for some (e.g. reminders, repeat-after),
+`@closeOnChange="saveTask()"` for the date pickers (`TaskDetailView.vue:138,193,227`), and
+`@update:modelValue="setPriority"`/`"setPercentDone"` (wrappers that call `saveTask`) for
+the selects. **Native fields auto-save on change — there is no modal-level Save/Cancel;
+every field commit persists immediately.** (The type-specific commit events for custom
+fields are in the Field-type → input table.)
 
 The `activeFields` reactive map (`TaskDetailView.vue`, `FieldType` union +
 `reactive({...})`) controls section visibility. `setActiveFields()` flips a field on
@@ -94,9 +98,12 @@ resource with its own CRUD endpoints, `xorm:"-"` on the task).
   `task` ref; only `saveTask` goes through `taskStore.update`.
 - **UI components:** `frontend/src/components/tasks/partials/EditAssignees.vue` and
   `EditLabels.vue` receive `v-model` (the current `task.assignees`/`task.labels`) plus
-  `taskId`; on each add/remove they call the store action and emit
-  `update:modelValue`. Both wrap the generic `Multiselect.vue`
-  (`frontend/src/components/input/Multiselect.vue`, `:multiple` true/false).
+  `taskId`; on each add/remove they call the store action. (`EditLabels` emits
+  `update:modelValue` on both add and remove; `EditAssignees` mutates the local ref on
+  remove without emitting — the precedent that matters for `CustomFields.vue` is the
+  store-action + local-state pattern, not emit symmetry.) Both wrap the generic
+  `Multiselect.vue` (`frontend/src/components/input/Multiselect.vue`, `:multiple`
+  true/false).
 
 ### Reusable input components (the type → input map is built from these)
 
@@ -104,7 +111,7 @@ resource with its own CRUD endpoints, `xorm:"-"` on the task).
 |---|---|
 | Date / datetime picker | `frontend/src/components/input/Datepicker.vue` |
 | Single- or multi-select (tag-style) | `frontend/src/components/input/Multiselect.vue` (`:multiple`, `searchResults`, `@select`, `#tag`/`#searchResult` slots) |
-| Native select over an enum | `frontend/src/components/input/FormSelect.vue`; `tasks/partials/PrioritySelect.vue`, `PercentDoneSelect.vue` (tiny native `<select>` over a constant) |
+| Native select over an options prop/slot | `frontend/src/components/input/FormSelect.vue` (native `<select>` over an `options` prop or default slot); `tasks/partials/PrioritySelect.vue`, `PercentDoneSelect.vue` (tiny native `<select>` over a local constant) |
 | Number / text input | `frontend/src/components/input/FormInput.vue` (supports `modelModifiers.number`), `FormField.vue` |
 | Multiline rich editor | `frontend/src/components/input/AsyncEditor.ts` (dynamic TipTap import — the same editor the Description field uses) |
 | Checkbox | `frontend/src/components/input/FancyCheckbox.vue` (styled), `FormCheckbox.vue` (native) |
@@ -302,13 +309,31 @@ export default class CustomFieldService extends AbstractService<CustomFieldValue
 		})
 	}
 
-	// The bulk upsert is a bare-array POST — NOT create (PUT) and NOT the default
-	// update (which runs the objectToSnakeCase interceptor on the body). Mirror
-	// TaskService.bulkCreate: a direct AuthenticatedHTTPFactory().post() bypasses
-	// the shared interceptors, so the bare-array body is sent unchanged.
+	// GET — bypasses AbstractService.getM, which mutates the response with
+	// result.maxPermission = Number(headers['x-max-permission']) (NaN — the
+	// plugin sets no such header, main.go:1239). Direct
+	// AuthenticatedHTTPFactory().get() returns the bare map unchanged.
+	async getValues(taskId: number): Promise<CustomFieldValuesMap> {
+		const {data} = await AuthenticatedHTTPFactory().get(
+			`/plugins/custom-fields/tasks/${taskId}/custom-fields`,
+		)
+		return data as CustomFieldValuesMap
+	}
+
+	// The bulk upsert — NOT create (PUT) and NOT the default update (which runs
+	// objectToSnakeCase on the body, mangling a bare array into an object). Direct
+	// AuthenticatedHTTPFactory().post() bypasses the shared interceptors, so the
+	// bare-array body is sent unchanged. Mirror TaskService.bulkCreate (task.ts:211).
 	async bulkUpsert(taskId: number, items: CustomFieldValueItem[]): Promise<CustomFieldValuesMap> {
+		// Relative path — AuthenticatedHTTPFactory() pins baseURL to /api/v1/
+		// (fetcher.ts: HTTPFactory → getApiBaseUrl → window.API_URL, default
+		// '/api/v1/'). An absolute `/api/v1/...` path would double-prefix to
+		// /api/v1/api/v1/... and 404 (axios combineURLs). TaskService.bulkCreate
+		// uses apiV2Url() (an absolute URL via new URL(...).toString()) for its
+		// v2 endpoint; the v1 plugin endpoint uses a relative path that combines
+		// with the v1 baseURL — same as the get/delete routes above.
 		const {data} = await AuthenticatedHTTPFactory().post(
-			`/api/v1/plugins/custom-fields/tasks/${taskId}/custom-fields`,
+			`/plugins/custom-fields/tasks/${taskId}/custom-fields`,
 			items, // bare array — the plugin decodes []valueItem
 		)
 		return data as CustomFieldValuesMap // bulkUpsertHandler returns readValuesForTask (the whole map)
@@ -316,12 +341,27 @@ export default class CustomFieldService extends AbstractService<CustomFieldValue
 }
 ```
 
-**The GET and DELETE use the default `AbstractService` plumbing** (they take no body, so the
-snake_case interceptor is not reached): `get({taskId})` and `delete({taskId, fieldId})`. The
-**route param is `{taskId}`**, so the call passes `{taskId}`, not `{id}` — verified against
-`getRouteReplacements` (`abstractService.ts:159`, `parameters[parameter]` where
-`parameter` is the `{taskId}` captured group). Passing `{id: taskId}` → no `taskId` key →
-route `…/tasks/undefined/custom-fields` → `strconv.ParseInt` 400 (`main.go:1221`).
+**DELETE uses the inherited `AbstractService.delete`** (route-param substitution via
+`getReplacedRoute`, no body, no `getM` mutation). **GET does NOT use the inherited
+`AbstractService.get`** — it delegates to `getM` (`abstractService.ts:305`), which does
+`result.maxPermission = Number(response.headers['x-max-permission'])` (`:314`). The plugin's
+`listValuesHandler` returns `c.JSON(http.StatusOK, out)` with **no `x-max-permission`
+header** (`main.go:1239`), so `Number(undefined)` = `NaN`; `result` (the default
+`modelGetFactory` passthrough, `:227`) is the response map, so the map gains an enumerable
+`maxPermission: NaN` key. That breaks AC#6 (a task with no assigned fields gets
+`{maxPermission: NaN}`, `Object.keys(...).length === 1` → the section shows for a project
+with no custom fields) **and** crashes rendering (`CustomFields.vue` iterates entries and
+reads `entry.field`; `NaN.field` → `undefined.display_order` → TypeError). Overriding
+`modelGetFactory` does not fix it — `getM` sets `.maxPermission` on whatever
+`modelGetFactory` returns (`:314` after `:313`). So **GET uses a direct
+`AuthenticatedHTTPFactory().get()`** (the same bypass pattern as `bulkUpsert`) — the
+`getValues` method above.
+
+The **route param is `{taskId}`** (for the inherited `delete`), so the call passes
+`{taskId}`, not `{id}` — verified against `getRouteReplacements` (`abstractService.ts:159`,
+`parameters[parameter]` where `parameter` is the `{taskId}` captured group). Passing
+`{id: taskId}` → no `taskId` key → route `…/tasks/undefined/custom-fields` →
+`strconv.ParseInt` 400 (`main.go:1221`).
 
 **The bulk POST returns the full map** — `bulkUpsertHandler` ends with
 `readValuesForTask(s, taskID)` (`main.go`), so the store action **replaces the entire
@@ -346,9 +386,9 @@ be a single `taskService.get` that already carries `customFields`.
 The native task `GET` cannot be augmented under yaegi (S3 AC#1, settled against
 `pkg/web/handler/read_one.go:33` and `pkg/routes/api/v2/tasks.go:107-131`). So:
 
-1. **Separate fetch.** `loadCustomFields(taskId)` calls `customFieldsService.get({taskId})`
-   (the route param is `{taskId}`, so the model is `{taskId}`, not `{id}` — see
-   `services/customField.ts`) → stashes the returned map in a `customFieldValues:
+1. **Separate fetch.** `loadCustomFields(taskId)` calls `customFieldsService.getValues(taskId)`
+   (a direct `AuthenticatedHTTPFactory().get()` — see `services/customField.ts`; the
+   route is a relative path, so no `{taskId}` model is needed) → stashes the returned map in a `customFieldValues:
    Ref<Record<ITask['id'], CustomFieldValuesMap>>` (keyed by taskId, analogous to how
    `tasks` is keyed by id at `stores/tasks.ts:139`). Called in `TaskDetailView`'s
    `watch(taskId)` **alongside** `taskService.get(...)`. This is the "extra round trip"
@@ -384,6 +424,16 @@ The native task `GET` cannot be augmented under yaegi (S3 AC#1, settled against
    400. `DELETE` is the only working clear path. (A `null` value could only be stored by
    writing the empty string for a non-required field — a different semantics, "set to
    empty," not "unset.")
+
+   **Save-vs-clear routing (applies to every type).** The commit handler routes by the
+   *new value*: empty (`null`, empty string, empty array) → `clearCustomFieldValue`
+   (DELETE); non-empty → `saveCustomFieldValue` (upsert). This covers the
+   **`Datepicker` clear-to-null** case a review surfaced — clearing a date sets the
+   bound value to `null` (`Datepicker.vue:74` emits `Date | null`), `@closeOnChange` fires,
+   and the handler routes to `clearCustomFieldValue` (not `saveCustomFieldValue`, which
+   would upsert `null` → 400). For `checkbox`, `false` is a real value (not empty) →
+   upsert, not clear. For `select`/`multiselect`, removing the last selected option empties
+   the array → clear. For text/number/url, emptying the field → clear.
 
 5. **Discard on navigate (AC#4).** Under immediate commit, an *in-progress* text/number
    edit (typed but not committed) is local to the input; navigating away discards it
@@ -529,11 +579,12 @@ or not). So:
 ## Error handling
 
 A failed upsert (400 — bad date, option not in the field's options, number out of
-`min`/`max`) surfaces via the toast/error helpers `TaskDetailView` already uses for
-`saveTask` (`error(...)` from `@/message`). On error, revert the input to the stored
-value (the store was updated on success only). Exact inline-error placement is left to
-implementation (the story defers it: "errors are shown, but exact placement is left to
-implementation").
+`min`/`max`) surfaces via a toast from `error(...)` imported from `@/message`
+(`TaskDetailView.vue:716` imports only `success` from `@/message` — `error` is **not** an
+existing `TaskDetailView` precedent; it is imported new for custom fields). On error,
+revert the input to the stored value (the store was updated on success only). Exact
+inline-error placement is left to implementation (the story defers it: "errors are shown,
+but exact placement is left to implementation").
 
 ## i18n
 
