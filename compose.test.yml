@@ -1,12 +1,6 @@
 services:
   vikunja:
-    image: itrt4176/vikunja:2.5-plugin-fix-backport
-    build:
-      context: https://github.com/itrt4176/vikunja.git#plugin-fix-backport
-      args:
-        RELEASE_VERSION: "2.5.0+plugin-fix-backport"
-        TARGETOS: linux
-        TARGETARCH: amd64
+    image: vikunja/vikunja:2.6
     ports:
       - "127.0.0.1:4176:3456"
     volumes:
