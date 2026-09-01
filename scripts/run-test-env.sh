@@ -126,6 +126,28 @@ else
 fi
 export FIELD_ID TASK_ID
 
+# ── Step 5c: Seed the field type variety (for the S5 render test) ──
+echo "==> Creating field definitions for each type..."
+TYPE_DEFS='[
+  {"name":"Text Field","type":"text","project_ids":['"$PROJECT_ID"']},
+  {"name":"Select Field","type":"select","options":[{"value":"draft","label":"Draft"},{"value":"published","label":"Published"}],"project_ids":['"$PROJECT_ID"']},
+  {"name":"Date Field","type":"date","project_ids":['"$PROJECT_ID"']},
+  {"name":"Checkbox Field","type":"checkbox","project_ids":['"$PROJECT_ID"']},
+  {"name":"URL Field","type":"url","project_ids":['"$PROJECT_ID"']},
+  {"name":"API-Only Field","type":"text","field_config":{"is_api_only":true},"project_ids":['"$PROJECT_ID"']}
+]'
+while read -r def; do
+  def_name=$(echo "$def" | jq -r .name)
+  def_resp=$(curl -s -X POST "$BASE_URL/api/v1/plugins/custom-fields/definitions" \
+    -H "Authorization: Bearer $JWT" -H "Content-Type: application/json" \
+    -d "$def")
+  if [ -z "$(echo "$def_resp" | jq -r '.id // empty')" ]; then
+    echo "   WARN: failed to create $def_name: $def_resp"
+  else
+    echo "   created: $def_name (id $(echo "$def_resp" | jq -r .id))"
+  fi
+done < <(echo "$TYPE_DEFS" | jq -c '.[]')
+
 # ── Step 6: Print result ────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
