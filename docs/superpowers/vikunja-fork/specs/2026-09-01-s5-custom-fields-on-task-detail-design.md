@@ -199,16 +199,15 @@ it independently).
 ## Architecture & file layout (vikunja frontend)
 
 S5 mirrors the assignee/label precedent. New files follow the existing
-model/service/component/store split; existing files modified are
+type/service/component/store split (types stand in for a model here — see
+No `models/customField.ts` below); existing files modified are
 `TaskDetailView.vue` (add the section), `Datepicker.vue` + `DatepickerInline.vue` (the
 `withTime` prop — fork core), and `en.json` (structural strings).
 
 ```
 frontend/src/
 ├── modelTypes/
-│   └── ICustomField.ts                 NEW — the {value, field} entry + CustomFieldDefinition shape + the map type
-├── models/
-│   └── customField.ts                  NEW — CustomFieldModel (parses field.options, field_config; value as native type)
+│   └── ICustomField.ts                 NEW — the {value, field} entry + CustomFieldDefinition shape + the map type (snake_case matching the API — no model; see below)
 ├── services/
 │   └── customField.ts                  NEW — CustomFieldService (bulkUpsert bypasses the snake_case interceptor; see service layer)
 ├── stores/
@@ -223,6 +222,20 @@ frontend/src/
 └── i18n/lang/
     └── en.json                         MODIFIED — task.attributes.customFields + empty/error toasts (structural strings only)
 ```
+
+### No `models/customField.ts` (deliberate omission)
+
+The file layout deliberately has **no `models/CustomFieldModel`**. `AbstractModel.assignData`
+(`frontend/src/models/abstractModel.ts:17`) does `Object.assign(this, omitBy(data, isNil))` — it drops
+`nil`/`undefined` values. The custom-field values map uses `value: null` as a **meaningful** value (unset,
+or invalid per the current definition — the S3 read-path policy). Routing the map through a model would
+`omitBy(isNil)`-drop every `value: null` entry, so a task with assigned-but-unset fields would render empty
+inputs for the wrong reason (the value was dropped by the model, not absent from the API). The service
+(§`services/customField.ts`) returns the raw `data` typed as `CustomFieldValuesMap` (the types use snake_case
+matching the API verbatim — `field_config`, `display_order`, `project_ids`, `is_api_only`), bypassing
+`AbstractService` and the `AbstractModel` transform entirely, so `value: null` is preserved end-to-end. No
+model class is needed or wanted; the types alone are the contract. (This supersedes the file-layout entry that
+appeared in earlier drafts of this spec.)
 
 ### `modelTypes/ICustomField.ts` (NEW)
 
