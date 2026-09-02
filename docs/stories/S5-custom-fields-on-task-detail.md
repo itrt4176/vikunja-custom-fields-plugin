@@ -150,8 +150,10 @@ array into `{"0":{…}}`). `CustomFieldDeleteModel extends IAbstract` (the real
 - After clearing *all* values, `activeFields.customFields` stays true until the
   task is re-opened (it's re-evaluated only by `setActiveFields` in the watch,
   not after `clearCustomFieldValue`) → an empty "Custom Fields" label until
-  reload. The spec explicitly accepts the `delete`-the-key approach; optional
-  fix: set `.value = null` instead of deleting.
+  reload. **Resolved** post-S5: `clearCustomFieldValue` now sets the entry's
+  `value` to `null` instead of deleting the key (the cleared field is still
+  assigned, so the row stays, rendered empty — matching the read path); see
+  the Post-S5 bugfixes below.
 - Robust portable e2e (self-contained image / CI-grade harness) — deferred to
   a future project; the throwaway `mage test:e2e` wiring note records the
   local-relative-path recipe until it lands.
@@ -164,3 +166,43 @@ array into `{"0":{…}}`). `CustomFieldDeleteModel extends IAbstract` (the real
 returns 200 with `value: null` for an assigned-but-unset field (was 404 under
 the old value-row iteration). Correct per the S3 read-path policy; a field not
 assigned to the project still 404s.
+
+## Post-S5 live-instance bugfixes
+
+Four shipped defects surfaced in a live test-instance session after the S5
+workflow finished (the per-task + final reviews passed, but the live UI
+exercised paths the unit tests didn't). Each was root-caused against source +
+the live API response, fixed TDD, and reviewed. Commits on the vikunja fork
+branch `feature/s5-custom-fields-task-detail`:
+
+1. **Select/multiselect rendered as a text box, not a dropdown** (`1a4a5c0ad`).
+   `Multiselect.searchResultsVisible` is false while the query is empty and
+   `showEmpty` is false (the default), so clicking the field focused the
+   search input but never opened the dropdown. Fix: `:show-empty="true"` on
+   both Multiselect bindings (`EditAssignees.vue` precedent).
+2. **Focusing an empty field and blurring without typing erased the row**
+   (`1a4a5c0ad`). `commit()` routed on `isEmpty(new)` alone, so blurring an
+   already-empty field fired `clearCustomFieldValue` → a DELETE (204 even with
+   no row) → the store deleted the map key → the `v-for` dropped the row. Fix:
+   a no-op guard — each commit handler computes the wire value, compares it to
+   the stored value (`storedValue`/`valueEquals` helpers), and fires nothing
+   if they match.
+3. **Setting another field made the erased rows reappear** (`1a4a5c0ad`).
+   `saveCustomFieldValue` wholesale-replaces the map from `readValuesForTask`,
+   which returns the cleared field as `value: null` → the row came back. Fix:
+   `clearCustomFieldValue` sets the entry's `value` to `null` instead of
+   deleting the key (a cleared field is still assigned, so the row stays,
+   rendered empty). This also fixes the "empty Custom Fields label after
+   clearing all values" item above.
+4. **Navigating task A → task B in the same project leaked A's values into B**
+   (`07afc4e46`, pre-existing, surfaced by bugfix review). `<CustomFields>` had
+   no `:key`, so the instance reused across tasks; `localValues` is seeded only
+   for absent keys, so A's values lingered and a blur could commit them onto
+   B. Fix: `:key="task.id"` on `<CustomFields>` (remount → re-seed). Same fix
+   made `commitCheckbox` write its `localValues` (it never did, so the bound
+   `:model-value` didn't track the toggle).
+
+Tests: 22/22 across `CustomFields.test.ts` + `tasks.customFields.test.ts` +
+`TaskDetailView.customFields.test.ts` (5 new RED→GREEN tests reproduce each
+bug); typecheck zero-new; lint clean. Verified live by the user after a
+watch-mode rebuild + container restart.
