@@ -2,7 +2,7 @@ service:
   secret: "test-secret-do-not-use-in-production"
   testingtoken: "test-token-for-seeding"
   enableregistration: true
-  publicurl: "http://127.0.0.1:3456"
+  publicurl: "http://127.0.0.1:4176"
 
 cors:
   enable: false
