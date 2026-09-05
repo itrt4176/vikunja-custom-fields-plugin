@@ -206,3 +206,71 @@ Tests: 22/22 across `CustomFields.test.ts` + `tasks.customFields.test.ts` +
 `TaskDetailView.customFields.test.ts` (5 new RED→GREEN tests reproduce each
 bug); typecheck zero-new; lint clean. Verified live by the user after a
 watch-mode rebuild + container restart.
+
+## Post-S5.1 UI refinements
+
+A live-instance review of the S5 UI surfaced five deviations from native field
+behavior. Fixed TDD on the vikunja fork branch
+`feature/s5.1-task-ui-refinements` (single commit `2ae175755`). No backend
+change: the S3 values response already carries assigned-but-unset fields as
+`value: null`, so visibility became a purely frontend concern. Verified
+1336/1336 unit tests, ESLint + Stylelint clean, and `vue-tsc` at the
+pre-existing 1769-error baseline (zero new errors).
+
+1. **Fields hidden until added.** The values map includes every assigned field
+   (`value: null` for unset), so `CustomFields.vue` rendered them all. A row now
+   renders iff its value is non-null or its id is in `customFieldActiveIds` —
+   a Set owned by `TaskDetailView.vue` (passed as a prop, reset in the
+   `watch(taskId)`). A "Set <field>" button per assigned field lives in a new
+   "Custom Fields" sidebar section (always visible — native parity with "Set
+   Progress" & co) and calls the component's exposed `focusField(fieldId)`
+   after activation, mirroring `setFieldActive` for native fields. Unset
+   API-only fields get no button: they can't be written in the UI, so
+   activating them would only reveal an empty forever-disabled input.
+2. **Collapse on clear (deliberate reversal).** Clearing a value now collapses
+   the row (native behavior: clearing a due date collapses that field):
+   `commitClear` emits `fieldCleared` on success and the parent drops the
+   activation. This *reverses* the post-S5 bugfix #3 decision ("the cleared
+   row stays, rendered empty") — that fix addressed an *unexpected*
+   mid-interaction disappearance; with explicit ADD semantics,
+   collapse-on-clear is the intended native behavior. The other two bugfix
+   intents are preserved: focusing an empty activated field and blurring
+   without typing still fires no commit (the row stays), and failed
+   saves/clears still revert to the stored value (the emit fires only on
+   success).
+3. **Single-select is a native `<select>`.** The single-select type previously
+   used the labels-style `Multiselect` (full column width, typable — issues 2
+   and 3 of the review). It now renders a Bulma `.select` around a native
+   `<select>` (PercentDoneSelect precedent): auto-width to the longest option,
+   not typable, leading empty option = unset, commit on `@change`. Gotcha
+   baked into `commitNativeSelect`: it writes `localValues` *before* the
+   no-op guard — without that, a failed save reverting to the pre-edit binding
+   value produces no vdom diff and the DOM keeps the rejected pick (the text
+   inputs only avoid this because their handlers write `localValues` on every
+   keystroke). Multi-select keeps `Multiselect` (labels precedent).
+4. **One grid column per field.** The `.column.custom-fields` wrapper and its
+   "Custom Fields" `detail-title` header are gone; `<CustomFields>` is a
+   fragment rendered as a direct child of `.columns.details`, so each field
+   wraps like a native column and gets the identical grey `detail-title` (now
+   with the type icon). This also resolves the review's styling complaint: the
+   section header no longer competes with field names, and field names get the
+   native title treatment.
+5. **Number input width.** Native controls in the grid size to their content;
+   a number input has no content-based width, so integer/decimal inputs are
+   capped at `max-inline-size: 20rem` (scoped CSS in `CustomFields.vue`).
+   Text/url stay full-width by choice; textarea/multiselect follow their
+   native analogs (Description, labels).
+
+Supporting changes: `frontend/src/constants/customFields.ts` (the
+`CustomFieldType -> IconProp` map used by both the sidebar buttons and the row
+titles), five FontAwesome icons newly registered in `misc/Icon.ts`
+(`faHashtag`, `faCalendarDay`, `faSquareCaretDown`, `faRectangleList`,
+`faGlobe`, plus solid `faClock` for datetime), and the
+`task.detail.actions.setCustomField` ("Set {field}") i18n key.
+
+**Deferred ideas (documented, not built):**
+- The sidebar button label ("Set <field>") could become a per-field-definition
+  setting (e.g. `field_config.button_label`), letting definitions choose verbs
+  like "Add" or "Track" instead of the generic "Set".
+- The type-derived icon could be overridable per field definition with any
+  registered FontAwesome icon (e.g. `field_config.icon`).
