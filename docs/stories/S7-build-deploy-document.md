@@ -35,11 +35,11 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 1. ✅ Running the existing Dockerfile from the fork produces a single image containing both the modified frontend and the stock Vikunja API.
 2. ✅ Mounting the plugin source directory into the container at the configured path loads the plugin on startup.
 3. ✅ The plugin loads successfully in a running container and custom fields are functional end-to-end (whitelist → definition → value → task detail display).
-4. A README exists in the plugin repo with clear setup instructions covering: enabling plugins in config, mounting the plugin directory, configuring the management whitelist, and managing fields via the plugin-served UI.
-5. The documentation notes that native management is a future epic, but the current setup needs no license.
+4. ✅ A README exists in the plugin repo with clear setup instructions covering: enabling plugins in config, mounting the plugin directory, configuring the management whitelist, and managing fields via the plugin-served UI.
+5. ✅ The documentation notes that native management is a future epic, but the current setup needs no license.
 6. A Vikunja admin unfamiliar with the project can follow the documentation and get custom fields running without external help.
 
-(1–3 verified 2026-09-06 — see Progress.)
+(1–3 verified 2026-09-06; 4–5 delivered 2026-09-06 — see Progress. 6 awaits a stranger-admin walkthrough.)
 
 ## Scope
 
@@ -96,32 +96,58 @@ the work was then built and is now in scope:
   `custom-fields-<tag>.zip` and attach it to a draft GitHub release with
   generated notes. Draft so the tested fork+plugin pairing is written before
   publishing.
+- **Documentation shipped (AC 4–5)** (this repo, branch
+  `feature/release-workflow`, plus a fork-README change on the fork's
+  `feature/gh-release-workflow`). Written from the shipped code, in the voice
+  of a released product:
+  - `README.md` — rewritten as project overview + quick start + development
+    pointer. The stale "not usable yet" status and pending-feature text are
+    gone; the versioning/pairing statement and the no-license /
+    future-native-management note (AC 5) are here.
+  - `docs/installation.md` — requirements (fork image, pairing, Web Awesome
+    CDN), release-zip install with the fixed `custom-fields/` folder, config
+    reference (the three `plugins.*` keys with their defaults — `enabled:
+    false`, `loader: native`, both of which leave the plugin inactive — and
+    `customfields.whitelist` semantics), Docker Compose example with the
+    wholesale-mount warning, start/verify steps, a managing-fields section
+    (impact previews, drafts, assignment rules), the upgrade procedure with
+    its clean-up caveat, and a troubleshooting table.
+  - `docs/api-reference.md` — the complete REST reference: auth model
+    (user JWT only; **API tokens are rejected** — their route-permission table
+    cannot cover plugin routes), the two authorization gates (whitelist for
+    definitions, task permissions + assignment check for values), the error
+    catalog with wire-accurate messages (internal 9000s codes are not
+    exposed), field-type/value format tables, all 15 API routes with request/
+    response schemas and examples, behavior notes (cascades, atomicity,
+    read-as-null policy), and a worked curl example.
+  - `docs/development.md` — repo layout, test instance, architecture, the
+    yaegi constraints and upstream-conversion checklist, release process.
+  - Fork `README.md` — a fork notice is now the first thing in the file (what
+    the fork is, its purpose, pointer to this repo for the full docs), with
+    the upstream content below kept intact.
 
 ### Outstanding
 
-1. **Plugin README / admin setup guide (AC 4–6) — the blocker.** The current
-   README is stale (still says "not usable yet", S5/S9 "pending", fork frontend
-   "not built yet") and contains nothing AC 4 requires. It needs: enabling the
-   yaegi plugin loader in config; mounting the plugin directory wholesale (so
-   `ui/` rides along — see the S9 notes below); configuring the management
-   whitelist; managing fields via `/api/v1/plugins/custom-fields/ui` with the
-   Web Awesome CDN note and the `ui/vendor` offline fallback; the release-zip
-   install/upgrade path; and the no-license / future-native-management note
-   (AC 5, and the "proving ground" design principle).
-2. **Merge both feature branches** — `feature/release-workflow` (here) and
+1. **Merge both feature branches** — `feature/release-workflow` (here) and
    `feature/gh-release-workflow` (fork) are written and reviewed but unmerged.
-3. **First releases.** Plugin: `git flow release finish <version>` (tag prefix
+2. **First releases.** Plugin: `git flow release finish <version>` (tag prefix
    `v`, GPG-signed per repo config) → workflow posts the draft → write pairing
    notes → publish; initial version number still to be chosen. Fork: cut
    `v2.6.0.1`, but only after the documented metadata-action dry-run gate from
    the release process in `AGENTS.md`. First GHCR push creates the package
    private — flip it to public.
-4. **AC 6 (stranger-admin walkthrough)** — an admin unfamiliar with the
-   project follows the finished docs end-to-end without help; only meaningful
-   once (1) is done.
+3. **AC 6 (stranger-admin walkthrough)** — an admin unfamiliar with the
+   project follows the finished docs end-to-end without help. Now meaningful:
+   the docs it tests exist.
+4. **Management-UI offline fallback (discovered while writing the docs).** The
+   S9 handoff note below describes a `ui/vendor` Web Awesome fallback; the
+   shipped UI has none — `index.html` hardcodes the CDN URL and the plugin
+   serves only `index.html` and `app.js`. If air-gapped instances are a real
+   requirement, self-hosting Web Awesome is new work: a static-asset route
+   plus a base-path override in the UI.
 
 ## From S9 (management UI) — document in build/deploy docs
 
 - The management UI URL: `/api/v1/plugins/custom-fields/ui` (bookmarkable; served by the plugin's unauthenticated route group).
-- The page loads Web Awesome from `https://ka-f.webawesome.com/webawesome@3.12.0/` — browsers need internet access to it. Self-hosting via `ui/vendor` (`data-webawesome` base path) is the offline fallback and the recommended default for instances handling sensitive data.
+- The page loads Web Awesome from `https://ka-f.webawesome.com/webawesome@3.12.0/` — browsers need internet access to it. **Correction (2026-09-06, while writing the docs):** the shipped UI has no `ui/vendor` fallback — the CDN URL is hardcoded in `index.html` and the plugin serves only `index.html` and `app.js`. The fallback this note described was never implemented; see Outstanding #4 if offline-capable management UI becomes a requirement.
 - The deployment mount must include the plugin directory **wholesale** (so `ui/` rides along) — a file-only mount breaks the UI.
