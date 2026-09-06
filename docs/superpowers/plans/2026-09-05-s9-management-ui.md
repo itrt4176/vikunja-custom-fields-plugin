@@ -18,7 +18,7 @@
 - Zero changes to the Vikunja fork. Zero behavior changes to existing S2/S3 endpoints.
 - Handler errors: `echo.NewHTTPError` for handler-level (401/400/404/403/500); model-layer errors via `toHTTPError` (plugin-local 9000s convention).
 - Whitelist gating follows existing handlers: definitions `Can*` methods (all `IsManager`), invoked per-endpoint like `readOneHandler`/`updateHandler` do.
-- Web Awesome pinned: `https://ka-f.webawesome.com/webawesome@3.12.0/` (theme CSS + utilities CSS + `webawesome.loader.js`). Custom elements always get closing tags; component events are `wa-*`.
+- Web Awesome pinned: `https://ka-f.webawesome.com/webawesome@3.12.0/` (theme CSS + utilities CSS + `webawesome.loader.js`). Custom elements always get closing tags; form controls emit the standard `change`/`input` events — only component-specific events are `wa-*` (e.g. `wa-show`, `wa-after-hide`; there is no `wa-change`).
 - UI strings hardcoded English; escape-by-default rendering — `textContent`/DOM element creation only, **never** `innerHTML` with API data.
 - Test loop for `main.go` edits: `docker compose -f compose.test.yml restart`, then `docker compose -f compose.test.yml logs | grep -i "loaded plugin"` (expect success, no yaegi errors).
 - `./scripts/run-test-env.sh` wipes `db/` fresh each run and prints a JWT for `testuser` (whitelisted); `otheruser` (NOT whitelisted) shares password `testpassword` — `JWT_OTHERUSER` is built by the script; re-login any time with:
@@ -147,7 +147,7 @@ console.debug('[custom-fields] management UI assets loaded');
 - [ ] **Step 5: Verify serving live**
 
 ```bash
-chmod a+r ui/index.html ui/app.js main.go   # container readability (CLAUDE.md troubleshooting)
+mkdir -p ui && chmod a+rx ui && chmod a+r ui/index.html ui/app.js main.go   # dir must be traversable, files readable (CLAUDE.md troubleshooting)
 docker compose -f compose.test.yml restart
 docker compose -f compose.test.yml logs | grep -i "loaded plugin"
 curl -si http://127.0.0.1:4176/api/v1/plugins/custom-fields/ui | head -8
@@ -205,7 +205,7 @@ In `RegisterAuthenticatedRoutes`, add as the first line:
 - [ ] **Step 3: Verify live**
 
 ```bash
-docker compose -f compose.test.yml restart
+# run-test-env.sh recreates the container (down --volumes + up -d), picking up main.go changes — no separate restart needed
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)  # or copy from the script's output
 curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:4176/api/v1/plugins/custom-fields/management-access
 JWT_OTHER=$(curl -s -X POST http://127.0.0.1:4176/api/v1/login -H 'Content-Type: application/json' -d '{"username":"otheruser","password":"testpassword"}' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
@@ -436,15 +436,16 @@ In `RegisterAuthenticatedRoutes`, directly after the definitions block (after th
 - [ ] **Step 5: Verify live**
 
 ```bash
-docker compose -f compose.test.yml restart
+# run-test-env.sh recreates the container (down --volumes + up -d) — main.go changes load fresh
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)
 BASE=http://127.0.0.1:4176/api/v1
-# a project and a task to hang values on
-PID=$(curl -s -X POST $BASE/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Impact"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+V2=http://127.0.0.1:4176/api/v2
+# v1 project/task creation is PUT — use the v2 POST endpoints (run-test-env.sh pattern)
+PID=$(curl -s -X POST $V2/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Impact"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 # three tasks — values are UNIQUE(field, task), so one task per value
-T1=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T2=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T3=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t3"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T1=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T2=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T3=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t3"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 # an integer field with range, three values (2 inside, one below a later min)
 DID=$(curl -s -X POST $BASE/plugins/custom-fields/definitions -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"name":"Cost","type":"integer","field_config":{},"display_order":0,"project_ids":[]}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 curl -s -X POST $BASE/plugins/custom-fields/tasks/$T1/custom-fields -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "[{\"custom_field_definition_id\":$DID,\"value\":3}]"
@@ -467,9 +468,10 @@ Then the select case (fresh script run for a clean slate):
 ```bash
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)
 BASE=http://127.0.0.1:4176/api/v1
-PID=$(curl -s -X POST $BASE/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Impact"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T1=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T2=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+V2=http://127.0.0.1:4176/api/v2
+PID=$(curl -s -X POST $V2/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Impact"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T1=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T2=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 DID=$(curl -s -X POST $BASE/plugins/custom-fields/definitions -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"name":"Status","type":"select","field_config":{},"display_order":0,"options":[{"value":"a","label":"A","display_order":0},{"value":"b","label":"B","display_order":1},{"value":"c","label":"C","display_order":2}],"project_ids":[]}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 curl -s -X POST $BASE/plugins/custom-fields/tasks/$T1/custom-fields -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "[{\"custom_field_definition_id\":$DID,\"value\":\"a\"}]"
 curl -s -X POST $BASE/plugins/custom-fields/tasks/$T2/custom-fields -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "[{\"custom_field_definition_id\":$DID,\"value\":\"b\"}]"
@@ -509,7 +511,7 @@ git commit -m "feat(s9): add edit and delete impact preview endpoints"
 
 ```html
 <!doctype html>
-<html lang="en" class="wa-theme-default">
+<html lang="en" class="wa-theme-default wa-cloak">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -846,7 +848,7 @@ Replace `show('state-app');` in `boot()` with:
 - [ ] **Step 3: Verify live**
 
 ```bash
-docker compose -f compose.test.yml restart
+# run-test-env.sh recreates the container — asset changes need no restart at all
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)
 BASE=http://127.0.0.1:4176/api/v1
 for i in 1 2; do curl -s -X POST $BASE/plugins/custom-fields/definitions -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "{\"name\":\"Field $i\",\"type\":\"text\",\"field_config\":{},\"display_order\":$i,\"project_ids\":[]}"; echo; done
@@ -965,7 +967,7 @@ async function fillProjects(selectedIds) {
   sel.replaceChildren();
   let projects = [];
   try {
-    projects = await fetchJSONv1('/projects');
+    projects = await fetchJSONv1('/projects'); // first page only (paginated endpoint) — fine at proving-ground scale
   } catch (e) {
     projects = []; // picker stays empty; add-by-ID still works (existence-only validation)
   }
@@ -1111,14 +1113,16 @@ function askConfirm(label, buildBody, okLabel, okVariant) {
     const done = (val) => {
       ok.removeEventListener('click', onOk);
       cancel.removeEventListener('click', onCancel);
-      dlg.hide();
+      // wa-dialog has no hide() method — the open property is the documented
+      // toggle (dialog.md: "Toggle this attribute to show and hide").
+      dlg.open = false;
       resolve(val);
     };
     const onOk = () => done(true);
     const onCancel = () => done(false);
     ok.addEventListener('click', onOk);
     cancel.addEventListener('click', onCancel);
-    dlg.show();
+    dlg.open = true;
   });
 }
 
@@ -1159,8 +1163,9 @@ async function saveForm() {
 Append (after the functions above):
 
 ```js
-$('f-type').addEventListener('wa-change', updateBlocks);
-$('f-all-projects').addEventListener('wa-change', () => {
+// wa-select/wa-checkbox emit the STANDARD change event — there is no wa-change.
+$('f-type').addEventListener('change', updateBlocks);
+$('f-all-projects').addEventListener('change', () => {
   $('block-assignment').classList.toggle('hidden', $('f-all-projects').checked);
 });
 $('btn-add-option').addEventListener('click', () => addOptionRow({}));
@@ -1206,11 +1211,12 @@ Then, in `cardFor`, replace the footer comment block with the Edit button:
 - [ ] **Step 4: Verify live**
 
 ```bash
-chmod a+r ui/app.js
-docker compose -f compose.test.yml restart
+chmod a+rx ui && chmod a+r ui/index.html ui/app.js
+# run-test-env.sh recreates the container (down --volumes + up -d) — main.go changes load fresh
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)
 BASE=http://127.0.0.1:4176/api/v1
-curl -s -X POST $BASE/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Form"}' > /dev/null
+V2=http://127.0.0.1:4176/api/v2
+curl -s -X POST $V2/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Form"}' > /dev/null
 ```
 
 Browser as `testuser`:
@@ -1291,15 +1297,17 @@ In `cardFor`, extend the footer (after `footer.append(edit);`):
 - [ ] **Step 3: Verify live**
 
 ```bash
-chmod a+r ui/app.js
-docker compose -f compose.test.yml restart
+chmod a+rx ui && chmod a+r ui/index.html ui/app.js
+# run-test-env.sh recreates the container (down --volumes + up -d) — main.go changes load fresh
 JWT=$(./scripts/run-test-env.sh 2>/dev/null | grep -o 'eyJ[^"]*' | head -1)
 BASE=http://127.0.0.1:4176/api/v1
-PID=$(curl -s -X POST $BASE/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Delete"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+V2=http://127.0.0.1:4176/api/v2
+# v1 project/task creation is PUT — use the v2 POST endpoints (run-test-env.sh pattern)
+PID=$(curl -s -X POST $V2/projects -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"CF Delete"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 # three tasks — values are UNIQUE(field, task), so one task per value
-T1=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T2=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
-T3=$(curl -s -X POST $BASE/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t3"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T1=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t1"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T2=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t2"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+T3=$(curl -s -X POST $V2/projects/$PID/tasks -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"title":"t3"}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 DID=$(curl -s -X POST $BASE/plugins/custom-fields/definitions -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d '{"name":"Doomed","type":"text","field_config":{},"display_order":0,"project_ids":[]}' | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
 curl -s -X POST $BASE/plugins/custom-fields/tasks/$T1/custom-fields -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "[{\"custom_field_definition_id\":$DID,\"value\":\"a\"}]"
 curl -s -X POST $BASE/plugins/custom-fields/tasks/$T2/custom-fields -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' -d "[{\"custom_field_definition_id\":$DID,\"value\":\"b\"}]"
