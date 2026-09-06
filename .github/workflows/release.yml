@@ -1,0 +1,39 @@
+name: Release
+
+# Packs the runtime-loaded plugin sources (main.go + ui/) plus README/LICENSE
+# into one zip and attaches it to a draft GitHub release. Tags reaching this
+# workflow are cut by `git flow release finish` / `git flow hotfix finish`,
+# both configured with the `v` tag prefix and GPG signing.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Package and attach plugin zip
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Package plugin
+        # Top-level folder is the fixed plugin dir name, so the same unzip
+        # command installs fresh and upgrades in place (new files replace
+        # old). git archive keeps the zip deterministic per commit and
+        # limited to tracked files.
+        run: |
+          git archive --format=zip \
+            --prefix="custom-fields/" \
+            -o "custom-fields-${{ github.ref_name }}.zip" \
+            HEAD README.md LICENSE main.go ui
+
+      - name: Create draft GitHub release with the zip
+        # Draft so the release notes (including the tested fork+plugin
+        # pairing) can be written before publishing.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          generate_release_notes: true
+          files: custom-fields-*.zip
