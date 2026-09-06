@@ -1709,10 +1709,22 @@ func uiAppJSHandler(c *echo.Context) error {
 	return c.Blob(http.StatusOK, "text/javascript; charset=utf-8", b)
 }
 
+// managementAccessHandler answers "is the current user on the management
+// whitelist?". Always 200 for any authenticated user — it is the gate check,
+// not a gated operation (S9 spec: "Backend additions" #1).
+func managementAccessHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	return c.JSON(http.StatusOK, map[string]bool{"is_manager": IsManager(u.Username)})
+}
+
 // RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
 // /api/v1/plugins/ group. The temporary S8 manager route is removed; IsManager
 // is now exercised on the real field-definition endpoints.
 func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
+	g.GET("/custom-fields/management-access", managementAccessHandler)
 	g.GET("/custom-fields/health", healthHandler) // S1 throwaway load-proof
 	g.POST("/custom-fields/definitions", createHandler)
 	g.GET("/custom-fields/definitions", listHandler)
