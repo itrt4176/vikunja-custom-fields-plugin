@@ -458,9 +458,13 @@ $('btn-add-project').addEventListener('click', () => {
     o.textContent = 'Project ' + pid;
     sel.appendChild(o);
   }
-  for (const o of sel.children) {
-    if (o.value === String(pid)) o.setAttribute('selected', '');
-  }
+  // A wa-option's `selected` attribute only seeds the initial selection at
+  // option-registration time; setting it on an already-connected option does
+  // not update the select's value (the saved payload came out with
+  // project_ids: []). The documented programmatic path is assigning the
+  // select's value property — an array when multiple.
+  const current = Array.isArray(sel.value) ? sel.value : (sel.value ? [sel.value] : []);
+  sel.value = [...new Set([...current, String(pid)])];
   $('f-project-id').value = '';
 });
 $('btn-new').addEventListener('click', () => openForm(null));
