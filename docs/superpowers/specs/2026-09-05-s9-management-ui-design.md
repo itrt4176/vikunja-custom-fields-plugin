@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-05
 **Story:** `docs/stories/S9-management-ui.md`
-**Status:** Approved design (brainstormed 2026-09-05)
+**Status:** Approved design (brainstormed 2026-09-05; revised same day after an independent adversarial review)
 **Repos touched:** `vikunja-custom-fields-plugin` only — zero changes to the Vikunja fork.
 
 ## Summary
@@ -37,21 +37,24 @@ true in every clause.
   (`routes.go:497` vs `:556`), so it needs no token — exactly what a browser GET needs.
   (Note: `vikunja-docs` claims unauthenticated plugin routes live at root `/plugins/` — the
   code says otherwise; the docs are wrong.)
-- A plugin can serve non-JSON responses: `echo.Context` is exported as a concrete type to
-  yaegi (`pkg/yaegi_symbols/echo.go:155`), so `c.HTML`/`c.Blob`/`c.NoContent` all work; no
-  middleware forces JSON. Both plugin groups inherit `no-store` cache control.
+- A plugin can serve non-JSON responses: `echo.Context` is exported to yaegi as an
+  interface type (`pkg/yaegi_symbols/echo.go:155`, via `reflect.ValueOf((*echo.Context)(nil))`),
+  so `c.HTML`/`c.Blob`/`c.NoContent` all work. No middleware transforms plugin responses:
+  the plugin groups inherit only `noStoreCacheControl` from the API group (`pkg/routes/routes.go`),
+  nothing JSON-wrapping. Both groups send `no-store` cache control.
 - `go:embed` is unavailable in interpreted code (no `embed` package in yaegi's stdlib), but
   `os` and `path/filepath` are (`stdlib/go1_21_os.go`, `go1_21_path_filepath.go` —
   `os.ReadFile` is exported). Yaegi code runs unsandboxed in-process; disk reads work.
 - A browser navigating to any URL sends no `Authorization` header, and Vikunja has no
   session-cookie auth for the API — the JWT lives in `localStorage['token']`
-  (fork `frontend/src/helpers/auth.ts`) and is attached by the SPA's axios interceptor. The
+  (fork `frontend/src/helpers/auth.ts`) and is attached per-request by the SPA's axios
+  interceptor (`frontend/src/helpers/fetcher.ts`). The
   only cookie is the HttpOnly refresh token, scoped to the refresh endpoints
   (`pkg/modules/auth/auth.go:57-108`). Therefore **no page served by this backend can be
   token-gated on navigation**; the shell must be served unauthenticated and authenticate its
   own API calls from JS. This is the same trust model as Vikunja's own SPA (`index.html` is
   public; auth happens client-side).
-- Plugin facts: `IsManager(username)` exists (`main.go:541`); handlers get the user via
+- Plugin facts: `IsManager(username)` exists (`main.go:537`); handlers get the user via
   `user.GetCurrentUser(c)`; `validateAssignment` checks project **existence only** — no
   permission check; definition `Delete` **cascade-destroys** values, value options, options,
   and assignments (`main.go`, verified); values are stored in one `text` column
@@ -83,8 +86,11 @@ implementation). `index.html` goes out with
 `text/html; charset=utf-8` (via `c.HTML`), `app.js` with `text/javascript; charset=utf-8`
 (`c.Blob`, explicit MIME string). A missing/unreadable file returns a clean 404 — this is the
 degenerate case of a plugin loaded without its assets. Both plugin groups already send
-`no-store`, so edited assets never linger. The compose test mount and the S7 deployment mount
-both carry `ui/` automatically — no deployment change.
+`no-store`, so edited assets never linger. The compose test mount
+(`./:/app/vikunja/plugins/custom-fields`, wholesale) carries `ui/` automatically. The S7
+deployment mount is **pending** (S7 status: pending): it must mount the plugin directory
+wholesale as its story describes, or `ui/` will be absent in production — confirming this is
+on S7's pickup list.
 
 **Auth model.** The shell is inert static HTML/JS. On load, `app.js` reads
 `localStorage['token']`; missing/blank → "open Vikunja and log in" view. It then calls
@@ -97,7 +103,10 @@ temp page does **not** replicate the SPA's cookie-based token refresh.
 **Security posture.** Field names/options are user-controlled data rendered by hand-rolled
 JS: everything renders via `textContent`/DOM element creation, never `innerHTML` with API
 data. The page loads third-party JS (Web Awesome CDN — below) on a page that handles the
-user's JWT; accepted as a bounded, documented trade at a pinned version.
+user's JWT; accepted as a bounded, documented trade at a pinned version. For instances
+handling sensitive data, self-hosting (the `ui/vendor` path) is the recommended default;
+the CDN is the accepted trade for this project's proving-ground deployment, revisitable
+before S7.
 
 ## Backend additions
 
@@ -116,15 +125,16 @@ Three small endpoints, all in `main.go`, following the existing handler conventi
    | Candidate edit | Counted |
    |---|---|
    | Type changed | **All** values for the definition (one count on the `definition_id` index — S3's) |
-   | Select/multi-select, options removed | Values stored against removed options (single-select: `Value` matches a removed option's stored representation; multi: distinct `custom_field_value_options` rows for removed option ids) |
+   | Select or multi-select, options removed | Distinct `custom_field_value_options` rows for the definition whose option IDs are among the removed options — **both** types store option linkage exclusively in that join table (`writeValue` sets `Value = ""` for all select-like types); "removed" is diffed by option `Value` strings, the key `setOptions` reconciles on |
    | Integer/decimal, range tightened | Values parsing to a number outside the new range |
    | Rename, description, `display_order`, `is_api_only`, `required`, added options, default | 0 — no stored value can be invalidated |
 
    At most three narrow count queries per call; the story's sanctioned "one query on the
    values table by `definition_id`" is the type-change case, generalized. Unparseable stored
    values are surfaced only by a type change, which already counts everything.
-3. **`GET /definitions/:id/impact`** — same response shape, meaning "if deleted": the total
-   value count, since `Delete` cascade-destroys values. This powers the AC#5 confirmation
+3. **`GET /definitions/:id/impact`** (**whitelist-gated** via `IsManager`, same as the POST —
+   the count is management-surface usage data) — same response shape, meaning "if deleted":
+   the total value count, since `Delete` cascade-destroys values. This powers the AC#5 confirmation
    dialog. Explicitly flagged as a small scope addition beyond AC#5's letter (a bare "are you
    sure" is the alternative); adopted because the query is one COUNT and delete is the most
    destructive operation on the surface.
@@ -142,21 +152,31 @@ the Web Awesome default theme; no dark-mode sync.
 of this spec) is confirmed against the current stable at implementation and recorded in the
 pinned URL. Components used (all free-tier): `wa-button`, `wa-input`, `wa-number-input`,
 `wa-select`/`wa-option`, `wa-checkbox`, `wa-textarea`, `wa-badge`, `wa-callout`, `wa-dialog`,
-plus `wa-stack`/`wa-split` utilities and `wa-cloak`. Custom elements always get closing
+plus `wa-stack`/`wa-split` utilities and the `wa-cloak` CSS class (FOUCE prevention — a
+class, not a component). Custom elements always get closing
 tags; events are the `wa-*` custom events. Costs, accepted: third-party JS from a pinned
 immutable CDN path on a JWT-handling page (the autoloader's lazy chunks can't carry SRI
 hashes, so the trust boundary is Fonticons + their CDN at that version); browsers need
 internet access to the CDN — an air-gapped instance renders a broken page, documented in S7,
 no offline fallback built. Escape hatch if the dependency ever needs to go: `npm pack` the
-package and self-host `dist-cdn` under `ui/vendor` with the base-path attribute — no build
-step either way.
+package and self-host `dist-cdn` under `ui/vendor` — no build
+step either way; the asset base path is set via the `data-webawesome` script attribute (or
+the `setBasePath()` method).
 
 **States:** loading (spinner) → not-authorized (`wa-callout`, AC#6) / expired-token (link to
 `/`) / app (list + form). Show/hide between two app states — no client-side routing, no
 history management.
 
-**List view.** `GET /definitions` (S2 ReadAll already embeds `field_config`, `options`,
-`project_ids`; `[]` = global). Rendered as **stacked definition cards** — deliberately not a
+**List view.** `GET /definitions` returns definition fields **only** — id, name, type,
+description, `field_config`, `display_order` (`definitionFieldsMap`, "no relations"); the
+relations-rich shape (`options`, `project_ids`, `[]` = global) is the single-resource
+ReadOne response. The card therefore renders from the list response and **fetches ReadOne
+per definition** to obtain `options` and `project_ids` — an N+1 over a handful of
+definitions, which keeps the story's "the UI consumes existing S2 endpoints" principle
+intact (AC#2's project-assignment display comes from the ReadOne data). Enriching S2's list
+response was rejected: it would change S2's shipped contract — deferred to upstreaming,
+where list endpoints embedding relations is the native shape. Cards render as **stacked
+definition cards** — deliberately not a
 `<table>` for mobile friendliness (a card reflows by construction; typical instance has a
 handful of definitions): name + type badge on the first line, then compact label/value lines
 (required, min–max when set, option count, "All projects"/"N projects", API-only badge),
@@ -175,7 +195,10 @@ Edit/Delete buttons per card. Sorted by `display_order`.
 - **Create:** `POST /definitions`. Validation errors render inline: S2's error messages are
   stable strings, mapped to their field (name/type/options/assignment); unrecognized
   messages fall back to a form-level `wa-callout` (AC#7).
-- **Edit:** save click first fires `POST /definitions/:id/impact` with the candidate body;
+- **Edit:** the in-progress form state is persisted to `localStorage` (keyed by definition
+  id) on every change and restored on load, so the expired-token detour — which ends in a
+  page reload — does not destroy mid-edit work. Save click first fires
+  `POST /definitions/:id/impact` with the candidate body;
   `affected_values > 0` raises a `wa-dialog` — "This edit invalidates N stored value(s)" —
   Save anyway / Cancel — then `PUT` (full-replace, S2 semantics) and list refresh (AC#9).
 - **Delete:** `GET /definitions/:id/impact` first, then the confirm `wa-dialog` — "This
@@ -201,8 +224,11 @@ No unit-test harness exists or is warranted: the plugin has no Go test suite (S1
 verified live), and the UI is framework-free with no build tooling. Verification follows the
 established live-instance pattern:
 
-- `./scripts/run-test-env.sh` (seeds whitelisted user); `PUT /api/v2/test/{table}` seeds
-  projects/tasks/values; `curl` drives the endpoints; `sqlite3 db/vikunja.db` proves counts.
+- `./scripts/run-test-env.sh` (seeds whitelisted user); projects/tasks seed via the
+  established script flow, and **values seed via the S3 API or direct `sqlite3` inserts** —
+  the generic `PUT /api/v2/test/{table}` endpoint addresses Vikunja's native tables and has
+  no established path to plugin-created tables; `curl` drives the endpoints;
+  `sqlite3 db/vikunja.db` proves counts.
 - Headed-browser AC walkthrough on the test instance. AC#6 uses a **non**-whitelisted user's
   token (not-authorized view + server-side 403 on writes). AC#7 via known-invalid submissions
   (options on a non-select type, blank name). AC#9's `affected_values` must equal the sqlite
