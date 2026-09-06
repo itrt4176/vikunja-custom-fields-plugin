@@ -1,11 +1,136 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="wa-theme-default wa-cloak">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Custom Fields — Management</title>
+<link rel="stylesheet" href="https://ka-f.webawesome.com/webawesome@3.12.0/styles/themes/default.css">
+<link rel="stylesheet" href="https://ka-f.webawesome.com/webawesome@3.12.0/styles/utilities.css">
+<script type="module" src="https://ka-f.webawesome.com/webawesome@3.12.0/webawesome.loader.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  main { max-width: 42rem; margin: 0 auto; padding: 1rem; }
+  .hidden { display: none !important; }
+  wa-card { margin-block-end: 0.75rem; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  h3 { margin: 0; }
+  .meta { margin: 0.15rem 0; font-size: 0.9em; }
+  .meta strong { font-weight: 600; }
+  .field-block { margin-block-end: 0.9rem; }
+  .field-error { color: var(--wa-color-danger-on-normal, #b00020); display: block; margin-block-start: 0.25rem; }
+  wa-input, wa-select, wa-number-input, wa-textarea { display: block; width: 100%; }
+  .opt-row { display: flex; gap: 0.4rem; align-items: center; margin-block-end: 0.4rem; }
+  .opt-row wa-input { width: auto; flex: 1 1 0; }
+</style>
 </head>
 <body>
-<p>Management UI assets are being served. The interface arrives with the next tasks.</p>
+<main>
+  <section id="state-loading"><wa-spinner></wa-spinner> <p>Loading…</p></section>
+
+  <section id="state-not-authorized" class="hidden">
+    <wa-callout variant="danger">
+      <strong>Not authorized.</strong> Your user is not on the custom-fields management whitelist.
+    </wa-callout>
+  </section>
+
+  <section id="state-expired" class="hidden">
+    <wa-callout variant="warning">
+      <strong>Session expired or missing.</strong>
+      Open <a href="/">Vikunja</a>, log in again, then return here.
+    </wa-callout>
+  </section>
+
+  <section id="state-app" class="hidden">
+    <header class="wa-split" style="align-items:center; margin-block-end:1rem;">
+      <h1>Custom Fields</h1>
+      <wa-button variant="brand" id="btn-new"><wa-icon name="plus" slot="start"></wa-icon>New field</wa-button>
+    </header>
+    <wa-callout id="list-error" variant="danger" class="hidden"></wa-callout>
+    <div id="list"></div>
+
+    <section id="form-view" class="hidden">
+      <header class="wa-split" style="align-items:center; margin-block-end:1rem;">
+        <h1 id="form-title">New field</h1>
+      </header>
+      <wa-callout id="form-banner" variant="danger" class="hidden"></wa-callout>
+
+      <div class="field-block">
+        <wa-input id="f-name" label="Name"></wa-input>
+        <small id="err-name" class="field-error hidden"></small>
+      </div>
+      <div class="field-block">
+        <wa-input id="f-description" label="Description" placeholder="Shown as a hint on tasks (optional)"></wa-input>
+      </div>
+      <div class="field-block">
+        <wa-number-input id="f-order" label="Display order" placeholder="0"></wa-number-input>
+      </div>
+      <div class="field-block">
+        <wa-select id="f-type" label="Type">
+          <wa-option value="text">Single-line text</wa-option>
+          <wa-option value="textarea">Multi-line text</wa-option>
+          <wa-option value="integer">Integer</wa-option>
+          <wa-option value="decimal">Decimal</wa-option>
+          <wa-option value="date">Date</wa-option>
+          <wa-option value="datetime">Datetime</wa-option>
+          <wa-option value="select">Select (single)</wa-option>
+          <wa-option value="multiselect">Multi-select</wa-option>
+          <wa-option value="checkbox">Checkbox</wa-option>
+          <wa-option value="url">URL</wa-option>
+        </wa-select>
+        <small id="err-type" class="field-error hidden"></small>
+      </div>
+
+      <div id="block-range" class="field-block hidden">
+        <div class="wa-split">
+          <wa-number-input id="f-min" label="Min (empty = unset)"></wa-number-input>
+          <wa-number-input id="f-max" label="Max (empty = unset)"></wa-number-input>
+        </div>
+      </div>
+
+      <div id="block-options" class="field-block hidden">
+        <p class="meta"><strong>Options</strong> (order = display order on save)</p>
+        <div id="options-rows"></div>
+        <wa-button id="btn-add-option" appearance="plain"><wa-icon name="plus" slot="start"></wa-icon>Add option</wa-button>
+        <small id="err-options" class="field-error hidden"></small>
+      </div>
+
+      <div class="field-block">
+        <wa-checkbox id="f-required">Required</wa-checkbox>
+        <wa-checkbox id="f-api-only">API-only (display-only in the task UI)</wa-checkbox>
+      </div>
+      <div class="field-block">
+        <wa-input id="f-default" label="Default value (optional, stored as metadata)"></wa-input>
+      </div>
+
+      <div class="field-block">
+        <wa-checkbox id="f-all-projects" checked>Assign to all projects</wa-checkbox>
+        <div id="block-assignment" class="hidden">
+          <wa-select id="f-projects" label="Projects" multiple></wa-select>
+          <div class="wa-split" style="margin-block-start:0.4rem;">
+            <wa-input id="f-project-id" label="Add project by ID" placeholder="e.g. 42"></wa-input>
+            <wa-button id="btn-add-project" appearance="plain">Add</wa-button>
+          </div>
+          <small class="meta">Assignment validates existence only — you can target projects your own account cannot see.</small>
+          <small id="err-assignment" class="field-error hidden"></small>
+        </div>
+      </div>
+
+      <div class="wa-split" style="margin-block-start:1.25rem;">
+        <wa-button variant="brand" id="btn-save">Save</wa-button>
+        <wa-button appearance="plain" id="btn-cancel">Cancel</wa-button>
+      </div>
+    </section>
+  </section>
+</main>
+
+<wa-dialog id="dialog-confirm" label="Confirm">
+  <div id="dialog-body"></div>
+  <div slot="footer" class="wa-split">
+    <wa-button id="dialog-cancel" appearance="plain">Cancel</wa-button>
+    <wa-button id="dialog-ok" variant="brand">Confirm</wa-button>
+  </div>
+</wa-dialog>
+
+<script src="app.js"></script>
 </body>
 </html>
