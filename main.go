@@ -1085,6 +1085,191 @@ func deleteHandler(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// countValuesForDefinition counts stored values for one definition — the
+// delete-impact total and the type-change edit impact (all values are
+// potentially invalid when the type changes).
+func countValuesForDefinition(s *xorm.Session, defID int64) (int64, error) {
+	return s.Table("custom_field_values").
+		Where("custom_field_definition_id = ?", defID).
+		Count(&CustomFieldValue{})
+}
+
+// countValuesUsingRemovedOptions counts distinct stored values of the
+// definition that reference any of the removed option IDs. Option IDs are
+// definition-scoped, so no join back to definitions is needed; distinct counts
+// stored VALUES (a multiselect value holding two removed options counts once —
+// AC#9's "count of affected values"). Both select and multiselect store option
+// linkage exclusively in custom_field_value_options (writeValue sets Value=""
+// for all select-like types).
+func countValuesUsingRemovedOptions(s *xorm.Session, removedIDs []int64) (int64, error) {
+	if len(removedIDs) == 0 {
+		return 0, nil
+	}
+	// Fix round 1 (S9 task 3): the slice-arg form `IN (?)` with a []int64 arg
+	// passes the slice through as ONE bind parameter here and the driver rejects
+	// it, so the placeholders are expanded manually and the ids go in as scalar
+	// args. Upstream: xorm's native slice expansion makes the slice form work —
+	// revert to `Where("custom_field_option_id IN (?)", removedIDs)`.
+	ph := make([]string, len(removedIDs))
+	for i := range ph {
+		ph[i] = "?"
+	}
+	args := make([]interface{}, len(removedIDs))
+	for i, id := range removedIDs {
+		args[i] = id
+	}
+	var rows []CustomFieldValueOption
+	if err := s.Table("custom_field_value_options").
+		Where("custom_field_option_id IN ("+strings.Join(ph, ",")+")", args...).
+		Find(&rows); err != nil {
+		return 0, fmt.Errorf("custom-fields: count removed-option values: %w", err)
+	}
+	distinct := map[int64]struct{}{}
+	for _, r := range rows {
+		distinct[r.CustomFieldValueID] = struct{}{}
+	}
+	return int64(len(distinct)), nil
+}
+
+// countValuesOutOfRange counts values of an integer/decimal field that parse
+// to a number outside the candidate's [min,max]. Unparseable stored values are
+// not counted here — a type change already counts everything (S9 spec table).
+func countValuesOutOfRange(s *xorm.Session, defID int64, fc FieldConfig) (int64, error) {
+	var vals []CustomFieldValue
+	if err := s.Table("custom_field_values").
+		Where("custom_field_definition_id = ?", defID).
+		Find(&vals); err != nil {
+		return 0, fmt.Errorf("custom-fields: load values for range check: %w", err)
+	}
+	var n int64
+	for _, v := range vals {
+		f, err := strconv.ParseFloat(strings.TrimSpace(v.Value), 64)
+		if err != nil {
+			continue
+		}
+		if fc.Min != nil && f < *fc.Min {
+			n++
+			continue
+		}
+		if fc.Max != nil && f > *fc.Max {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// computeImpact returns how many stored values the candidate edit would
+// invalidate — the diff semantics table in the S9 spec, verbatim. curOpts are
+// the CURRENT option rows (their DB IDs are what value rows reference).
+func computeImpact(s *xorm.Session, cur *CustomFieldDefinition, curOpts []CustomFieldOption, cand *definitionRequest) (int64, error) {
+	if cur.Type != cand.Type {
+		return countValuesForDefinition(s, cur.ID)
+	}
+	if isSelectLike(cur.Type) {
+		candVals := map[string]struct{}{}
+		for _, o := range cand.Options {
+			candVals[o.Value] = struct{}{}
+		}
+		var removedIDs []int64
+		for _, o := range curOpts {
+			if _, ok := candVals[o.Value]; !ok {
+				removedIDs = append(removedIDs, o.ID)
+			}
+		}
+		return countValuesUsingRemovedOptions(s, removedIDs)
+	}
+	if cur.Type == "integer" || cur.Type == "decimal" {
+		tightened := false
+		if cur.FieldConfig.Min == nil && cand.FieldConfig.Min != nil {
+			tightened = true
+		}
+		if cur.FieldConfig.Max == nil && cand.FieldConfig.Max != nil {
+			tightened = true
+		}
+		if !tightened && cur.FieldConfig.Min != nil && cand.FieldConfig.Min != nil && *cand.FieldConfig.Min > *cur.FieldConfig.Min {
+			tightened = true
+		}
+		if !tightened && cur.FieldConfig.Max != nil && cand.FieldConfig.Max != nil && *cand.FieldConfig.Max < *cur.FieldConfig.Max {
+			tightened = true
+		}
+		if tightened {
+			return countValuesOutOfRange(s, cur.ID, cand.FieldConfig)
+		}
+	}
+	return 0, nil
+}
+
+// editImpactHandler previews how many stored values a candidate PUT would
+// invalidate. Whitelist-gated via CanUpdate — the same gate as the update whose
+// result is being previewed. The body is the candidate definition, the exact
+// JSON the subsequent PUT will send (S9 spec: server-side diffing is
+// authoritative; the UI must not re-implement validation semantics).
+func editImpactHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	var req definitionRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid request body")
+	}
+	if err := validateProjectIDList(req.ProjectIDs); err != nil {
+		return toHTTPError(err)
+	}
+	d := &CustomFieldDefinition{ID: id}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanUpdate(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	cur, curOpts, _, err := d.ReadOne(s)
+	if err != nil {
+		return toHTTPError(err)
+	}
+	n, err := computeImpact(s, cur, curOpts, &req)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]int64{"affected_values": n})
+}
+
+// deleteImpactHandler previews the delete cascade: Delete destroys all stored
+// values (verified), so the count is the total. Whitelist-gated via CanRead —
+// the same gate as readOneHandler; the count is management-surface usage data.
+func deleteImpactHandler(c *echo.Context) error {
+	u, err := user.GetCurrentUser(c)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid id")
+	}
+	d := &CustomFieldDefinition{ID: id}
+	s := db.NewSession()
+	defer s.Close()
+	ok, err := d.CanRead(s, u)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	if !ok {
+		return echo.NewHTTPError(http.StatusForbidden, "not permitted to manage custom fields")
+	}
+	n, err := countValuesForDefinition(s, id)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, map[string]int64{"affected_values": n})
+}
+
 // ── Value handlers (S3). Read: collection + per-field GET, shaped
 // {definition_id: {value, field}}. Write: bulk upsert (bare-array body, R4),
 // per-field create/update/delete sharing the writeValue helper.
@@ -1731,6 +1916,10 @@ func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
 	g.GET("/custom-fields/definitions/:id", readOneHandler)
 	g.PUT("/custom-fields/definitions/:id", updateHandler)
 	g.DELETE("/custom-fields/definitions/:id", deleteHandler)
+	// S9 impact previews. Same path, two verbs: POST = edit-diff (candidate
+	// body), GET = delete cascade count.
+	g.POST("/custom-fields/definitions/:id/impact", editImpactHandler)
+	g.GET("/custom-fields/definitions/:id/impact", deleteImpactHandler)
 	// S3 field values. The group mounts at /api/v1/plugins and every plugin path
 	// carries the /custom-fields namespace itself (S2 convention), so the value
 	// resource is /api/v1/plugins/custom-fields/tasks/:task/custom-fields[/:field_id]
