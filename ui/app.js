@@ -123,6 +123,12 @@ function cardFor(item) {
   edit.textContent = 'Edit';
   edit.addEventListener('click', () => openForm(item.id));
   footer.append(edit);
+  const del = document.createElement('wa-button');
+  del.setAttribute('variant', 'danger');
+  del.setAttribute('appearance', 'plain');
+  del.textContent = 'Delete';
+  del.addEventListener('click', () => confirmDelete(item.id));
+  footer.append(del);
 
   card.append(header, body, footer);
   return card;
@@ -465,4 +471,30 @@ for (const evt of ['input', 'change']) {
   $('form-view').addEventListener(evt, () => {
     try { saveDraft(collectForm()); } catch {}
   });
+}
+
+async function confirmDelete(id) {
+  let n = 0;
+  try {
+    const imp = await api('/definitions/' + id + '/impact');
+    n = imp.affected_values;
+  } catch (e) {
+    if (e.status === 401) return;
+    // Count is a nicety; the cascade still warns below if the preview fails.
+  }
+  const ok = await askConfirm('Delete field', (body) => {
+    body.textContent = 'This permanently deletes the field and its ' + n +
+      ' stored value(s). This cannot be undone.';
+  }, 'Delete field', 'danger');
+  if (!ok) return;
+  try {
+    await api('/definitions/' + id, { method: 'DELETE' });
+  } catch (e) {
+    if (e.status === 401) return;
+    const box = $('list-error');
+    box.textContent = 'Delete failed: ' + e.message;
+    box.classList.remove('hidden');
+    return;
+  }
+  await loadList();
 }
