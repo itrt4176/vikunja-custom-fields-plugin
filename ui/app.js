@@ -62,8 +62,69 @@ async function fetchJSONv1(path) {
   return res.json();
 }
 
-// List rendering arrives with the list-view task; the app state is the
-// deliverable here.
+// The list endpoint returns definition fields ONLY (no relations —
+// definitionFieldsMap). Cards need options + project_ids, so each definition
+// is followed by a ReadOne (N+1 over a handful of definitions — S9 spec).
+async function loadList() {
+  const defs = await api('/definitions');
+  const items = await Promise.all(defs.map(async (d) => {
+    try {
+      const full = await api('/definitions/' + d.id);
+      return { ...d, options: full.options || [], project_ids: full.project_ids || [] };
+    } catch (e) {
+      return { ...d, options: [], project_ids: [], relFailed: true };
+    }
+  }));
+  items.sort((a, b) => (a.display_order || 0) - (b.display_order || 0));
+  $('list').replaceChildren(...items.map(cardFor));
+}
+
+function metaLine(label, value) {
+  const p = document.createElement('p');
+  p.className = 'meta';
+  const b = document.createElement('strong');
+  b.textContent = label + ': ';
+  p.appendChild(b);
+  p.appendChild(document.createTextNode(value));
+  return p;
+}
+
+function cardFor(item) {
+  const card = document.createElement('wa-card');
+  const header = document.createElement('div');
+  header.className = 'wa-split';
+  header.style.alignItems = 'center';
+  const h = document.createElement('h3');
+  h.textContent = item.name;
+  const badge = document.createElement('wa-badge');
+  badge.setAttribute('variant', 'neutral');
+  badge.textContent = item.type;
+  header.append(h, badge);
+
+  const body = document.createElement('div');
+  const fc = item.field_config || {};
+  body.append(metaLine('Required', fc.required ? 'yes' : 'no'));
+  if (fc.min != null || fc.max != null) {
+    body.append(metaLine('Range', (fc.min ?? '−∞') + ' … ' + (fc.max ?? '∞')));
+  }
+  if (item.type === 'select' || item.type === 'multiselect') {
+    body.append(metaLine('Options', String((item.options || []).length)));
+  }
+  body.append(metaLine('Assigned to', (item.project_ids || []).length === 0 ? 'All projects' : item.project_ids.length + ' project(s)'));
+  if (fc.is_api_only) body.append(metaLine('API-only', 'yes'));
+  if (item.description) body.append(metaLine('Description', item.description));
+  if (item.relFailed) body.append(metaLine('Warning', 'details unavailable (read failed)'));
+
+  const footer = document.createElement('div');
+  footer.className = 'wa-split';
+  footer.style.marginTop = '0.5rem';
+  // Action buttons are added by later tasks (Edit in the form task, Delete in
+  // the delete task) — the footer is intentionally empty here.
+
+  card.append(header, body, footer);
+  return card;
+}
+
 async function boot() {
   if (!token()) {
     show('state-expired');
@@ -76,6 +137,7 @@ async function boot() {
       return;
     }
     show('state-app');
+    await loadList();
   } catch (e) {
     if (e.status === 401) return; // expired view already shown by api()
     console.error(e);
