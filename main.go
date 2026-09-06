@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1673,6 +1675,40 @@ func (p *CustomFieldsPlugin) Migrations() []*xormigrate.Migration {
 	}}
 }
 
+// ── Management UI (S9). The shell is served WITHOUT the JWT middleware because
+// browser navigation carries no Authorization header and Vikunja has no session
+// cookie for API auth; the page authenticates its own API calls from
+// localStorage['token'] (S9 spec: "Auth model"). The shell is inert static
+// HTML/JS — the same trust model as Vikunja's own SPA index.html.
+
+// uiDir resolves the plugin's ui asset directory: <plugins.dir>/custom-fields/ui.
+// plugins.dir is absolute in the test and deployment configurations; if a
+// relative value is ever configured, resolve it against service.rootpath
+// (config.go:54 — the key Vikunja itself anchors relative paths to).
+func uiDir() string {
+	dir := viper.GetString("plugins.dir")
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(viper.GetString("service.rootpath"), dir)
+	}
+	return filepath.Join(dir, "custom-fields", "ui")
+}
+
+func uiIndexHandler(c *echo.Context) error {
+	b, err := os.ReadFile(filepath.Join(uiDir(), "index.html"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, "management UI assets not found")
+	}
+	return c.Blob(http.StatusOK, "text/html; charset=utf-8", b)
+}
+
+func uiAppJSHandler(c *echo.Context) error {
+	b, err := os.ReadFile(filepath.Join(uiDir(), "app.js"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusNotFound, "management UI assets not found")
+	}
+	return c.Blob(http.StatusOK, "text/javascript; charset=utf-8", b)
+}
+
 // RegisterAuthenticatedRoutes mounts the plugin's authenticated routes on the
 // /api/v1/plugins/ group. The temporary S8 manager route is removed; IsManager
 // is now exercised on the real field-definition endpoints.
@@ -1695,6 +1731,13 @@ func (p *CustomFieldsPlugin) RegisterAuthenticatedRoutes(g *echo.Group) {
 	g.DELETE("/custom-fields/tasks/:task/custom-fields/:field_id", deleteOneValueHandler)
 }
 
+// RegisterUnauthenticatedRoutes mounts the management UI shell on the
+// /api/v1/plugins group's no-JWT twin (pkg/routes/routes.go:987).
+func (p *CustomFieldsPlugin) RegisterUnauthenticatedRoutes(g *echo.Group) {
+	g.GET("/custom-fields/ui", uiIndexHandler)
+	g.GET("/custom-fields/ui/app.js", uiAppJSHandler)
+}
+
 func healthHandler(c *echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{
 		"name":    "custom-fields",
@@ -1710,6 +1753,10 @@ func NewPlugin() plugins.Plugin { return singleton }
 // NewAuthenticatedRouterPlugin is the typed factory yaegi's loader requires — yaegi
 // wraps return values per declared type, so sub-interface assertions don't work.
 func NewAuthenticatedRouterPlugin() plugins.AuthenticatedRouterPlugin { return singleton }
+
+// NewUnauthenticatedRouterPlugin is the typed factory yaegi's loader requires
+// for the no-JWT route group (see NewAuthenticatedRouterPlugin).
+func NewUnauthenticatedRouterPlugin() plugins.UnauthenticatedRouterPlugin { return singleton }
 
 // NewMigrationPlugin is the typed factory yaegi's loader looks for to register
 // database migrations.
