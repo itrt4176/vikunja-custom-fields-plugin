@@ -37,8 +37,9 @@ true in every clause.
   (`routes.go:497` vs `:556`), so it needs no token — exactly what a browser GET needs.
   (Note: `vikunja-docs` claims unauthenticated plugin routes live at root `/plugins/` — the
   code says otherwise; the docs are wrong.)
-- A plugin can serve non-JSON responses: `echo.Context` is exported to yaegi as an
-  interface type (`pkg/yaegi_symbols/echo.go:155`, via `reflect.ValueOf((*echo.Context)(nil))`),
+- A plugin can serve non-JSON responses: `echo.Context` is exported to yaegi as a concrete
+  struct type (echo v5 declares `type Context struct`; `pkg/yaegi_symbols/echo.go:155`
+  exports it via `reflect.ValueOf((*echo.Context)(nil))`),
   so `c.HTML`/`c.Blob`/`c.NoContent` all work. No middleware transforms plugin responses:
   the plugin groups inherit only `noStoreCacheControl` from the API group (`pkg/routes/routes.go`),
   nothing JSON-wrapping. Both groups send `no-store` cache control.
