@@ -137,7 +137,19 @@ async function boot() {
       return;
     }
     show('state-app');
-    await loadList();
+    try {
+      await loadList();
+    } catch (e) {
+      // state-app is already visible, so the error callout must render where
+      // the manager is looking — the list area — leaving actions usable.
+      if (e.status === 401) return; // expired view already shown by api()
+      console.error(e);
+      const box = document.createElement('wa-callout');
+      box.setAttribute('variant', 'danger');
+      box.textContent = 'Failed to load: ' + e.message;
+      $('list-error').replaceChildren(box);
+      $('list-error').classList.remove('hidden');
+    }
   } catch (e) {
     if (e.status === 401) return; // expired view already shown by api()
     console.error(e);
