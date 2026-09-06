@@ -61,8 +61,11 @@ true in every clause.
   (`CustomFieldValue.Value`) plus the `custom_field_value_options` join table for
   multi-select; `FieldConfig` = `{required, default, min*, max*, is_api_only}` (min/max are
   pointers so 0 ≠ unset); options carry `{value, label, display_order}`.
-- S2 deliberately leaves definition READ un-gated (S5's task rendering consumes it) — so
-  AC#6 cannot be enforced by a read-403 and needs the capability check below.
+- Every S2 definition handler — reads included — is whitelist-gated at the handler layer
+  (all four `Can*` methods return `IsManager`, `main.go:451-466`); S5's task rendering gets
+  definitions through the S3 values response (task-permission-gated), never the definitions
+  endpoints. AC#6 is therefore enforced server-side on every definition call; the capability
+  check below is what lets the UI render the correct state gracefully before any data call.
 
 ## Architecture
 
@@ -211,8 +214,8 @@ in/out, normalizes errors to `{status, message}`, routes 401 to the expired view
 
 ## Error handling
 
-- Non-manager → not-authorized view; server-side writes remain 403 regardless (defense in
-  depth — the UI is convenience, the API is the gate).
+- Non-manager → not-authorized view; every server-side definition call remains 403
+  regardless (defense in depth — the UI is convenience, the API is the gate).
 - 401 (any call) → expired-token view.
 - Network/5xx → `wa-callout` with the message; list/actions stay usable.
 - Missing asset file → 404 from the plugin (documented degenerate case).
