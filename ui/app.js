@@ -395,18 +395,31 @@ function askConfirm(label, buildBody, okLabel, okVariant) {
     const cancel = $('dialog-cancel');
     ok.textContent = okLabel;
     ok.setAttribute('variant', okVariant);
+    let settled = false;
     const done = (val) => {
+      if (settled) return;
+      settled = true;
       ok.removeEventListener('click', onOk);
       cancel.removeEventListener('click', onCancel);
       // wa-dialog has no hide() method — the open property is the documented
       // toggle (dialog.md: "Toggle this attribute to show and hide").
+      dlg.removeEventListener('wa-hide', onHide);
       dlg.open = false;
       resolve(val);
     };
     const onOk = () => done(true);
     const onCancel = () => done(false);
+    // wa-hide fires when the dialog is requested to close — Escape or
+    // light-dismiss, and also when closed programmatically via open=false
+    // (dialog.md Events: "wa-hide — Emitted when the dialog is requested to
+    // close"; "If the source is the dialog element itself, the user has
+    // pressed Escape or the dialog has been closed programmatically").
+    // Treat it as Cancel; the settled guard makes the programmatic-close
+    // emission after done() a harmless no-op.
+    const onHide = () => done(false);
     ok.addEventListener('click', onOk);
     cancel.addEventListener('click', onCancel);
+    dlg.addEventListener('wa-hide', onHide);
     dlg.open = true;
   });
 }
