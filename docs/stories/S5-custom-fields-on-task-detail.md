@@ -274,3 +274,68 @@ titles), five FontAwesome icons newly registered in `misc/Icon.ts`
   like "Add" or "Track" instead of the generic "Set".
 - The type-derived icon could be overridable per field definition with any
   registered FontAwesome icon (e.g. `field_config.icon`).
+
+## Post-S5.1 live-review fixes
+
+Three more rounds of fixes from live review of the S5.1 UI against the
+plugin-enabled test instance (vikunja fork commits `e36a471fa`, `8848d8587`,
+`2fc166eb1` on `feature/s5.1-task-ui-refinements`; each round TDD with RED
+verified first, final state 1342/1342 unit tests, lint/stylelint clean,
+`vue-tsc` at the 1769-error baseline). Still no backend changes.
+
+1. **Checkbox icon didn't render.** The FA library only ships `square-check`
+   under the *regular* prefix (`faSquareCheck` is imported from
+   `free-regular-svg-icons` in `misc/Icon.ts`), but a bare `"square-check"`
+   string resolves against the *solid* prefix and renders nothing — a
+   runtime-only failure invisible to the stubbed-Icon unit tests. The map in
+   `constants/customFields.ts` now uses the prefixed form
+   `['far', 'square-check']` (`IconProp` allows prefix arrays).
+2. **Text/url/textarea render full-width below the columns grid** (the native
+   Labels section is the precedent — Labels lives after `.columns.details`,
+   full-width). A url field is a single-line text field with extra
+   validation, so it intentionally gets the text field's width and
+   placement. Grid columns keep select/date/checkbox/number/multiselect.
+   Structural evolution across the three rounds: shared wrapper with margins
+   → wrapper + `column` class (fixes horizontal gutter: `.columns.details`
+   uses negative margins, a non-column child bleeds wider than the
+   Labels/Description sections) → final form: **no wrapper** — each
+   full-width field is its own full-break `.column`
+   (`.custom-field-full { flex-basis: 100% }` in `CustomFields.vue`), so
+   Bulma's column padding supplies the horizontal gutter and a uniform
+   vertical rhythm above, between and below the rows.
+3. **Field titles/icons now grey like native detail-titles.** Root cause:
+   `TaskDetailView.vue`'s scoped `.details .detail-title { color:
+   var(--grey-400) }` can't reach child-component DOM (the scope attribute
+   isn't applied to nodes rendered by `CustomFields`), so titles fell back to
+   default text color. `CustomFields.vue` mirrors the rule in its own scoped
+   style.
+4. **Date-only fields no longer show time-relative strings.** With the
+   date-display preference at its default (`RELATIVE`),
+   `Datepicker.vue`'s closed-state label rendered `dayjs.from(now)` — for a
+   date-only value (today at 00:00) that's "18 hours ago". `Datepicker` now
+   branches on its `withTime` prop: `withTime === false` shows day-relative
+   labels ("Today"/"Tomorrow" — reusing the existing
+   `input.datepicker.today/tomorrow` i18n keys) or the plain localized date
+   (`formatDate(d, 'LL')`); `withTime === true` (all native usages, and
+   custom datetime fields) keeps the display-preference formatting. There
+   were no other `withTime=false` consumers. New `Datepicker.test.ts` covers
+   the branch.
+5. **Number inputs capped at `max-inline-size: 9rem`** (tightened from the
+   first round's 20rem after live review).
+
+**Deferred (accepted for now):** the vertical gap between full-width custom
+fields is still larger than the Labels→Description section gap. The gap is
+the sum of two stacked `.column` paddings (0.75rem each) between adjacent
+`.custom-field-full` rows in `CustomFields.vue`; matching the section rhythm
+would mean reducing `padding-block` on `.custom-field-full` rows (and the
+first/last row boundaries need checking against the grid above and the
+Labels section below if touched).
+
+**Dev-workflow note (durable):** the frontend can be developed against the
+plugin-enabled test instance without rebuilding the image: copy
+`frontend/.env.local.example` to `frontend/.env.local`, set
+`DEV_PROXY=http://127.0.0.1:4176`, run `pnpm dev` (see
+`frontend/README.md`). All `/api` traffic proxies to the container, plugin
+routes included. `mage test:e2e` can *not* exercise custom fields: it spawns
+its own plugin-less API (no `VIKUNJA_PLUGINS_*` in its env list), and there
+are no custom-field e2e specs.
