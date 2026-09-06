@@ -81,6 +81,7 @@ without slipping the final S7 ship date.
 - [x] **S2** — Field Definition API
 - [x] **S3** — Task Field Values API
 - [x] **S5** — Custom Fields on Task Detail
+- [x] **S9** — Management UI *(off the critical path — tracked here for completeness; it feeds S7 like the spine stories do)*
 - [ ] **S7** — Build, Deploy & Document
 
 ## Notes

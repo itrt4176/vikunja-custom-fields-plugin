@@ -54,3 +54,9 @@ This story also validates the end-to-end experience: build, deploy, configure, u
 - Creating new Docker images or build processes (the existing Dockerfile is sufficient)
 - Publishing the plugin to a package registry or marketplace
 - Automated integration tests in CI
+
+## From S9 (management UI) — document in build/deploy docs
+
+- The management UI URL: `/api/v1/plugins/custom-fields/ui` (bookmarkable; served by the plugin's unauthenticated route group).
+- The page loads Web Awesome from `https://ka-f.webawesome.com/webawesome@3.12.0/` — browsers need internet access to it. Self-hosting via `ui/vendor` (`data-webawesome` base path) is the offline fallback and the recommended default for instances handling sensitive data.
+- The deployment mount must include the plugin directory **wholesale** (so `ui/` rides along) — a file-only mount breaks the UI.
