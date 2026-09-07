@@ -496,9 +496,15 @@ func (v *CustomFieldValue) canWrite(s *xorm.Session, u *user.User) (bool, error)
 	return ok, nil
 }
 
-func (v *CustomFieldValue) CanCreate(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
-func (v *CustomFieldValue) CanUpdate(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
-func (v *CustomFieldValue) CanDelete(s *xorm.Session, u *user.User) (bool, error) { return v.canWrite(s, u) }
+func (v *CustomFieldValue) CanCreate(s *xorm.Session, u *user.User) (bool, error) {
+	return v.canWrite(s, u)
+}
+func (v *CustomFieldValue) CanUpdate(s *xorm.Session, u *user.User) (bool, error) {
+	return v.canWrite(s, u)
+}
+func (v *CustomFieldValue) CanDelete(s *xorm.Session, u *user.User) (bool, error) {
+	return v.canWrite(s, u)
+}
 
 // whitelist holds the lowercase usernames permitted to manage custom fields.
 // Populated once in Init() from Vikunja's config (customfields.whitelist,
@@ -1806,12 +1812,12 @@ func (l *taskDeletedListener) Name() string { return "custom-fields-task-deleted
 type CustomFieldsPlugin struct{}
 
 func (p *CustomFieldsPlugin) Name() string    { return "custom-fields" }
-func (p *CustomFieldsPlugin) Version() string { return "0.1.0" }
+func (p *CustomFieldsPlugin) Version() string { return "1.0.0" }
 
 func (p *CustomFieldsPlugin) Init() error {
 	whitelist = loadWhitelist()
 	events.RegisterListener((&models.TaskDeletedEvent{}).Name(), &taskDeletedListener{})
-	log.Infof("[custom-fields] plugin v0.1.0 initialized")
+	log.Infof("[custom-fields] plugin v1.0.0 initialized")
 	return nil
 }
 
@@ -1942,7 +1948,7 @@ func (p *CustomFieldsPlugin) RegisterUnauthenticatedRoutes(g *echo.Group) {
 func healthHandler(c *echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{
 		"name":    "custom-fields",
-		"version": "0.1.0",
+		"version": "1.0.0",
 		"status":  "ok",
 	})
 }
