@@ -146,6 +146,60 @@ the work was then built and is now in scope:
    requirement, self-hosting Web Awesome is new work: a static-asset route
    plus a base-path override in the UI.
 
+## Resolution
+
+- **Status:** Delivered 2026-09-06. Acceptance criteria 1–5 pass (1–3 by
+  Nick's verification and smoke testing; 4–5 by the documentation shipped in
+  this story). **AC 6 (stranger-admin walkthrough) has not been performed** —
+  the story is therefore not checked off in
+  `docs/stories/story-dependency-graph.md`, and front-matter `status:` stays
+  `pending` until that walkthrough passes. Flip both when it does.
+- **How it was built.** Three deliverables: (1) the fork's release pipeline —
+  `.github/workflows/ci.yml` + `release.yml` on `feature/gh-release-workflow`
+  (docker-only, GHCR via GITHUB_TOKEN, free runners, amd64+arm64, per-ref
+  concurrency on `:unstable`; S3-dependent upstream jobs commented out with a
+  revival recipe in the file header); (2) this repo's release workflow —
+  `.github/workflows/release.yml` (`v*` tags → `git archive` zip with the
+  fixed `custom-fields/` top folder → draft GitHub release); (3) the
+  documentation set — plugin `README.md` (overview/quick start/dev pointer)
+  plus `docs/installation.md`, `docs/api-reference.md` (complete REST
+  reference), `docs/development.md`, and a fork notice leading the fork's
+  `README.md`. Survived two independent adversarial reviews; the second
+  corrected a false API-token claim (tokens DO work on plugin routes when
+  granted the matching `plugins` permissions), added a `/db` volume to the
+  Compose example, and scoped the empty-value clearing rule.
+- **Notable deviations:**
+  - The S9 handoff note promised a `ui/vendor` Web Awesome offline fallback;
+    the shipped UI hardcodes the CDN and serves only `index.html`/`app.js`.
+    Documented the CDN requirement instead and recorded the gap (see
+    Outstanding #4) rather than documenting a feature that does not exist.
+  - Documentation is written in the shipped-voice ahead of the actual merge
+    and first releases, per Nick's instruction ("when this merges, it will
+    be").
+  - The `cfAPIVersion` load-time handshake discussed during versioning design
+    was intentionally not implemented — Nick deferred deciding where it
+    belongs in the fork. Version pairing is documented in release notes
+    instead.
+- **Key decisions:** GHCR-only via GITHUB_TOKEN (no secrets, no Docker Hub);
+  fork tags `v<upstream>.<fork-release>` with the plugin deliberately not
+  encoded (independent software, pairing in release notes); the plugin zip
+  always extracts to `custom-fields/` so one unzip installs and upgrades;
+  draft releases so pairing notes precede publishing.
+- **What was left open (each self-contained):**
+  - `docs/stories/story-dependency-graph.md` — S7 unchecked: AC 6 walkthrough
+    is the gate. Fix: perform the walkthrough, then tick S7 and set this
+    story's `status: done`.
+  - First releases: plugin version number still to be chosen (then
+    `git flow release finish <v>`); fork `v2.6.0.1` gated on the
+    metadata-action dry-run documented in the fork's `AGENTS.md`; first GHCR
+    push creates the package private — flip to public.
+  - Upstream merges re-add the fork's deleted community workflows (preview,
+    auto-label, automerge-label, crowdin, dependency-diff,
+    issue-closed-comment, nixpkgs-update, stale-waiting-for-reply) — prune
+    them again at the next upstream merge.
+  - If air-gapped management UI ever matters: self-host Web Awesome behind a
+    plugin static route plus a base-path override (Outstanding #4).
+
 ## From S9 (management UI) — document in build/deploy docs
 
 - The management UI URL: `/api/v1/plugins/custom-fields/ui` (bookmarkable; served by the plugin's unauthenticated route group).
