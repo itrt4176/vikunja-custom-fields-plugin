@@ -68,8 +68,10 @@ customfields:
   whitelist: "alice,bob"         # usernames allowed to manage custom fields
 ```
 
-All four keys matter, and all four have defaults that leave the plugin
-inactive:
+Three of these keys have defaults that leave the plugin inactive
+(`enabled: false`, `loader: native`, empty whitelist). `plugins.dir` defaults
+to a usable `<rootpath>/plugins` but is listed because the `custom-fields/`
+folder must exist inside it:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -106,6 +108,7 @@ services:
     volumes:
       - ./config.yml:/etc/vikunja/config.yml:ro
       - ./plugins:/app/vikunja/plugins
+      - ./db:/db
     environment:
       VIKUNJA_SERVICE_PUBLICURL: http://localhost:3456/
       VIKUNJA_DATABASE_TYPE: sqlite
@@ -206,6 +209,6 @@ Database tables migrate themselves on startup; no manual step is ever needed.
 | UI loads but is unstyled and inert | The browser cannot reach `https://ka-f.webawesome.com/webawesome@3.12.0/`. The management UI loads its component library from that CDN. |
 | UI shows *Session expired or missing* | The browser has no valid Vikunja session. Open the main Vikunja app in the same browser, log in, and return to the UI. |
 | UI shows *Not authorized* / API returns 403 | Your username is not in `customfields.whitelist` (or it changed without a restart). Comparison is case-insensitive. |
-| API returns 401 on every call | No valid user JWT. Plugin endpoints accept the same `Authorization: Bearer <jwt>` the web app uses; Vikunja API tokens are **not** accepted (their route permissions cannot cover plugin routes). |
+| API returns 401 on every call | No valid credential. Plugin endpoints accept the same `Authorization: Bearer <jwt>` the web app uses, or an API token whose permissions include the matching `plugins` entries — a token without them is rejected like any invalid credential. |
 | A field's value cannot be set on a task | The field is not assigned to that task's project — assignment is checked on every write. Global fields apply everywhere. |
 | A stored value reads back as `null` | Values that no longer match their field — e.g. after a removed select option or a type change — read as `null` rather than erroring. The stored data is unaffected until the field is deleted. |

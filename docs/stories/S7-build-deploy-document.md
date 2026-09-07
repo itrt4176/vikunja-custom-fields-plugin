@@ -113,8 +113,8 @@ the work was then built and is now in scope:
     (impact previews, drafts, assignment rules), the upgrade procedure with
     its clean-up caveat, and a troubleshooting table.
   - `docs/api-reference.md` — the complete REST reference: auth model
-    (user JWT only; **API tokens are rejected** — their route-permission table
-    cannot cover plugin routes), the two authorization gates (whitelist for
+    (user JWT, or an API token granted the matching `plugins` permissions),
+    the two authorization gates (whitelist for
     definitions, task permissions + assignment check for values), the error
     catalog with wire-accurate messages (internal 9000s codes are not
     exposed), field-type/value format tables, all 15 API routes with request/

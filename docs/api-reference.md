@@ -15,8 +15,7 @@ shipped; for installation and configuration see
 
 ## Authentication
 
-All API routes except the two management-UI routes require a **Vikunja user
-JWT**:
+All API routes except the two management-UI routes require authentication:
 
 ```
 Authorization: Bearer <jwt>
@@ -26,9 +25,14 @@ This is the same token the Vikunja web app uses — it is held in the browser's
 `localStorage` under `token` after login. There is no separate plugin
 authentication.
 
-**Vikunja API tokens are not accepted.** API tokens authorize against a fixed
-route-permission table that does not include plugin routes, so any
-`Authorization: Bearer tk_…` API token is rejected with `401`.
+**API tokens are accepted when scoped correctly.** A `tk_…` API token
+authorizes a plugin route only if its permissions include the `plugins` group
+entry for that exact route and method — every plugin endpoint is listed as its
+own entry under the `plugins` group in `GET /api/v1/routes`, the same list the
+token-creation UI offers. A token without the matching permission is rejected
+with `401`, like any invalid credential. Requests made with an API token act
+as the token's owner, so the management whitelist and task permissions apply
+to that user exactly as they do for JWT requests.
 
 ## Authorization model
 
@@ -69,7 +73,7 @@ Status codes and messages:
 | 400 | Value validation failure | `invalid value for <type> field: <detail>`, `value for a required field must not be empty`, `option value "<value>" is not a valid option for this field`, `field is not assigned to this task's project` |
 | 401 | Missing or invalid JWT | `unauthorized` |
 | 403 | Authenticated but not permitted | `not permitted to manage custom fields` (definitions), `no access to this task` (value reads), `no write access to this task` (value writes) |
-| 404 | Resource absent | `custom field definition <id> not found`, `custom field value not found for field <id> on task <id>`, `task <id> not found`, `value not found` |
+| 404 | Resource absent | `custom field definition <id> not found`, `custom field value not found for field <id> on task <id>`, `task <id> not found` (only via a race between the permission check and the task lookup — a missing task normally surfaces as `403`), `value not found` |
 | 409 | Create when a value already exists | `custom field value already exists for field <id> on task <id>` |
 | 500 | Database or unexpected failure | Passes through the internal error text |
 
@@ -99,8 +103,11 @@ Value rules that apply across types:
   or can no longer be coerced to the field's type (e.g. after a removed select
   option or a numeric range change) reads back as `null`. Reads never fail
   because of stale stored data.
-- Writing an empty string stores an empty value, which reads back as `null`.
-  To delete a value outright, use the DELETE endpoint.
+- Clearing by writing an "empty" value only works for `text` and `textarea`
+  (empty string), and for non-required `select`/`multiselect` (empty string /
+  empty array). For the remaining types an empty write fails validation with
+  `400` — use the DELETE endpoint to clear any value. A stored empty value
+  reads back as `null`.
 - `field_config.default` and `field_config.is_api_only` are **not enforced by
   the API** — they are stored and returned. The fork's task UI honors
   `is_api_only` by rendering the field as display-only.
@@ -180,22 +187,25 @@ second call:
 
 | Method | Path | Auth | Permission |
 | --- | --- | --- | --- |
-| GET | `/management-access` | JWT | any authenticated user |
-| GET | `/health` | JWT | any authenticated user |
-| GET | `/definitions` | JWT | manager |
-| POST | `/definitions` | JWT | manager |
-| GET | `/definitions/{id}` | JWT | manager |
-| PUT | `/definitions/{id}` | JWT | manager |
-| DELETE | `/definitions/{id}` | JWT | manager |
-| POST | `/definitions/{id}/impact` | JWT | manager |
-| GET | `/definitions/{id}/impact` | JWT | manager |
-| GET | `/tasks/{task}/custom-fields` | JWT | task read |
-| POST | `/tasks/{task}/custom-fields` | JWT | task write |
-| GET | `/tasks/{task}/custom-fields/{field_id}` | JWT | task read |
-| POST | `/tasks/{task}/custom-fields/{field_id}` | JWT | task write |
-| PUT | `/tasks/{task}/custom-fields/{field_id}` | JWT | task write |
-| DELETE | `/tasks/{task}/custom-fields/{field_id}` | JWT | task write |
+| GET | `/management-access` | yes | any authenticated user |
+| GET | `/health` | yes | any authenticated user |
+| GET | `/definitions` | yes | manager |
+| POST | `/definitions` | yes | manager |
+| GET | `/definitions/{id}` | yes | manager |
+| PUT | `/definitions/{id}` | yes | manager |
+| DELETE | `/definitions/{id}` | yes | manager |
+| POST | `/definitions/{id}/impact` | yes | manager |
+| GET | `/definitions/{id}/impact` | yes | manager |
+| GET | `/tasks/{task}/custom-fields` | yes | task read |
+| POST | `/tasks/{task}/custom-fields` | yes | task write |
+| GET | `/tasks/{task}/custom-fields/{field_id}` | yes | task read |
+| POST | `/tasks/{task}/custom-fields/{field_id}` | yes | task write |
+| PUT | `/tasks/{task}/custom-fields/{field_id}` | yes | task write |
+| DELETE | `/tasks/{task}/custom-fields/{field_id}` | yes | task write |
 | GET | `/ui` and `/ui/app.js` | none | serves the management UI |
+
+"Auth: yes" means any authenticated credential — a user JWT, or an API token
+with the matching `plugins` permission (see [Authentication](#authentication)).
 
 ---
 
