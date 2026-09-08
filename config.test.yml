@@ -26,6 +26,11 @@ log:
 mailer:
   enabled: false
 
+# Webhook-verification sink lives on the host bridge IP (private), which Vikunja
+# blocks by default to prevent SSRF — allow it in the test instance only.
+outgoingrequests:
+  allownonroutableips: true
+
 ratelimit:
   enabled: false
 
