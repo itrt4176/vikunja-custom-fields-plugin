@@ -1851,12 +1851,12 @@ func (l *taskDeletedListener) Name() string { return "custom-fields-task-deleted
 type CustomFieldsPlugin struct{}
 
 func (p *CustomFieldsPlugin) Name() string    { return "custom-fields" }
-func (p *CustomFieldsPlugin) Version() string { return "1.0.0" }
+func (p *CustomFieldsPlugin) Version() string { return "1.1.0" }
 
 func (p *CustomFieldsPlugin) Init() error {
 	whitelist = loadWhitelist()
 	events.RegisterListener((&models.TaskDeletedEvent{}).Name(), &taskDeletedListener{})
-	log.Infof("[custom-fields] plugin v1.0.0 initialized")
+	log.Infof("[custom-fields] plugin v1.1.0 initialized")
 	return nil
 }
 
@@ -1987,7 +1987,7 @@ func (p *CustomFieldsPlugin) RegisterUnauthenticatedRoutes(g *echo.Group) {
 func healthHandler(c *echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{
 		"name":    "custom-fields",
-		"version": "1.0.0",
+		"version": "1.1.0",
 		"status":  "ok",
 	})
 }
