@@ -1569,6 +1569,21 @@ func writeValue(s *xorm.Session, taskID, fieldID int64, def *CustomFieldDefiniti
 	return val, nil
 }
 
+// queueTaskUpdatedEvent queues a host-defined task.updated event on the session
+// for dispatch after Commit. Host-defined event types constructed by plugin code
+// dispatch end-to-end; plugin-defined types cannot (S2 spikes 3/3b: the host's
+// json.Marshal rejects yaegi method-bridge fields, so the event never reaches
+// listeners). Callers flush with events.DispatchPending after s.Commit()
+// succeeds — a failed request never publishes.
+func queueTaskUpdatedEvent(s *xorm.Session, taskID int64, u *user.User) error {
+	t, err := models.GetTaskByIDSimple(s, taskID)
+	if err != nil {
+		return toHTTPError(ErrCustomFieldTaskNotFound{ID: taskID})
+	}
+	events.DispatchOnCommit(s, &models.TaskUpdatedEvent{Task: &t, Doer: u})
+	return nil
+}
+
 // bulkUpsertHandler (POST /tasks/:task/custom-fields) writes one or more field
 // values in a single request. R4: the body is a BARE JSON array of valueItems,
 // not a wrapper object, so it is decoded directly with encoding/json — echo v5's
@@ -1606,9 +1621,17 @@ func bulkUpsertHandler(c *echo.Context) error {
 			return err
 		}
 	}
+	// one event per request: every item mutates the same task and the payload
+	// is identical for each, so per-item events would just duplicate
+	if len(items) > 0 {
+		if err := queueTaskUpdatedEvent(s, taskID, u); err != nil {
+			return err
+		}
+	}
 	if err := s.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	events.DispatchPending(c.Request().Context(), s)
 	// re-read for the canonical response
 	out, err := readValuesForTask(s, taskID)
 	if err != nil {
@@ -1664,9 +1687,13 @@ func createOneValueHandler(c *echo.Context) error {
 	if _, err := writeValue(s, taskID, fieldID, def, opts, req.Value); err != nil {
 		return err
 	}
+	if err := queueTaskUpdatedEvent(s, taskID, u); err != nil {
+		return err
+	}
 	if err := s.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	events.DispatchPending(c.Request().Context(), s)
 	all, err := readValuesForTask(s, taskID)
 	if err != nil {
 		return toHTTPError(err)
@@ -1721,9 +1748,13 @@ func updateOneValueHandler(c *echo.Context) error {
 	if _, err := writeValue(s, taskID, fieldID, def, opts, req.Value); err != nil {
 		return err
 	}
+	if err := queueTaskUpdatedEvent(s, taskID, u); err != nil {
+		return err
+	}
 	if err := s.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	events.DispatchPending(c.Request().Context(), s)
 	all, err := readValuesForTask(s, taskID)
 	if err != nil {
 		return toHTTPError(err)
@@ -1761,14 +1792,22 @@ func deleteOneValueHandler(c *echo.Context) error {
 		Delete(&CustomFieldValueOption{}); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
-	if _, err := s.Table("custom_field_values").
+	n, err := s.Table("custom_field_values").
 		Where("custom_field_definition_id = ? AND task_id = ?", fieldID, taskID).
-		Delete(&CustomFieldValue{}); err != nil {
+		Delete(&CustomFieldValue{})
+	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	// no-op delete (value already absent): nothing changed, no event
+	if n > 0 {
+		if err := queueTaskUpdatedEvent(s, taskID, u); err != nil {
+			return err
+		}
 	}
 	if err := s.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
+	events.DispatchPending(c.Request().Context(), s)
 	return c.NoContent(http.StatusNoContent)
 }
 
